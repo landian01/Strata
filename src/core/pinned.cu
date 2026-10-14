@@ -57,7 +57,7 @@ static_assert(sizeof(SharedArenaHeader) <= kSharedArenaHeaderBytes);
 // are the resident arena.  This shared-file layout is intended for tmpfs (/dev/shm); hugetlbfs would need
 // hugepage-aligned file size and arena offset rather than the 4 KiB header layout used here.
 void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::string& shared_file,
-              uint64_t shared_pack_hash, void*& mapping_base, uint64_t& mapping_bytes) {
+              uint64_t shared_pack_hash, void*& mapping_base, uint64_t& mapping_bytes, bool normal_pages = false) {
     mapping_base = nullptr;
     mapping_bytes = 0;
 #ifdef _WIN32
@@ -69,7 +69,7 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     // PROCESS must enable it in its own token (AdjustTokenPrivileges) before VirtualAlloc, or the call fails.
     // An account without the assignment, or a failure to enable, leaves the process as it was: VirtualAlloc
     // then refuses and the 4 KB fallback below runs - that is the EXPECTED outcome on a desktop.
-    {
+    if (!normal_pages) {
         HANDLE tok = nullptr;
         if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
             TOKEN_PRIVILEGES tp{};
@@ -86,7 +86,7 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     // fails with ERROR_PRIVILEGE_NOT_HELD.  That is the EXPECTED outcome on a desktop, not an error.
     SIZE_T large = GetLargePageMinimum();
     // A/B switch: STRATA_NO_LARGEPAGES=1 skips the large-page attempt, same run, same boot.
-    if (large > 0 && std::getenv("STRATA_NO_LARGEPAGES") == nullptr) {
+    if (!normal_pages && large > 0 && std::getenv("STRATA_NO_LARGEPAGES") == nullptr) {
         // MEM_LARGE_PAGES requires the allocation size to be an exact multiple of the large page size -
         // anything else is ERROR_INVALID_PARAMETER (87), which reads like a privilege problem but is not.
         // Round up: the slack is under 2 MB and the tail stays unused.
@@ -103,6 +103,8 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
         note = "large pages refused for " + std::to_string((unsigned long long) lbytes) + " B (GetLargePageMinimum=" +
                std::to_string((unsigned long long) large) + ", VirtualAlloc error " +
                std::to_string((unsigned long long) GetLastError()) + "); using 4 KB pages";
+    } else if (normal_pages) {
+        note = "normal pages required by --resident-after-load (tail decommit)";
     } else if (std::getenv("STRATA_NO_LARGEPAGES") != nullptr) {
         note = "large pages skipped (STRATA_NO_LARGEPAGES); using 4 KB pages";
     } else {
@@ -112,6 +114,7 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     got = PageBacking::NormalPages;
     return p;
 #else
+    (void) normal_pages;
     if (!shared_file.empty()) {
         if (shared_pack_hash == 0) {
             note = "shared arena requires a nonzero pack hash";
@@ -353,9 +356,9 @@ PinnedArena::PinnedArena(uint64_t bytes, uint64_t slice) : PinnedArena(bytes, un
 
 PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                          uint64_t max_pinned_bytes, const std::string& shared_file,
-                         uint64_t shared_pack_hash) : capacity(bytes) {
+                         uint64_t shared_pack_hash, bool normal_pages) : capacity(bytes) {
     if (bytes == 0) return;
-    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes);
+    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes, normal_pages);
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
         mapping_bytes = bytes;
@@ -493,6 +496,98 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
         }
     }
     ready.store(INT_MAX, std::memory_order_release);   // every slice done (or given up on)
+}
+
+bool PinnedArena::trim_prefix(uint64_t keep_bytes, std::string& err) {
+    err.clear();
+#ifdef _WIN32
+    if (!base || backing != PageBacking::NormalPages || mapping_base != base || keep_bytes == 0) {
+        err = "resident-after-load requires an owned normal-page arena";
+        return false;
+    }
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const uint64_t page = info.dwPageSize;
+    if (!page || capacity > UINT64_MAX - (page - 1) || keep_bytes > capacity ||
+        keep_bytes > UINT64_MAX - (page - 1)) {
+        err = "resident-after-load: invalid committed prefix";
+        return false;
+    }
+    const uint64_t old_end = (capacity + page - 1) / page * page;
+    const uint64_t keep = (keep_bytes + page - 1) / page * page;
+    const bool whole_pin = slice_bytes == 0 && registered_bytes > 0;
+    // Unlock the OLD range before changing the registration boundary used by our destructor.
+    // One range avoids rounding a chunk boundary into an adjacent still-locked page.
+    const uint64_t lock_off = slice_bytes ? registered_bytes : 0;
+    if (locked_bytes) {
+        if (!VirtualUnlock((uint8_t*) base + lock_off, (SIZE_T) locked_bytes)) {
+            err = "resident-after-load: VirtualUnlock failed (" + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+        locked_bytes = 0;
+    }
+    auto unregister = [&](uint64_t off) {
+        const cudaError_t e = cudaHostUnregister((uint8_t*) base + off);
+        if (e == cudaSuccess) return true;
+        err = std::string("resident-after-load: cudaHostUnregister: ") + cudaGetErrorString(e);
+        (void) cudaGetLastError();
+        return false;
+    };
+    if (whole_pin) {
+        if (!unregister(0)) return false;
+        registered_bytes = 0;
+    } else if (slice_bytes) {
+        // Registrations are a contiguous prefix, with the last end in registered_bytes.
+        // A slice touching even one page of the removed suffix must be unregistered first.
+        while (!slice_starts.empty() && (registered_bytes + page - 1) / page * page > keep) {
+            const uint64_t off = slice_starts.back();
+            if (!unregister(off)) return false;
+            slice_starts.pop_back();
+            registered_bytes = off;
+            registered_slices = (int) slice_starts.size();
+        }
+    }
+    if (keep < old_end && !VirtualFree((uint8_t*) base + keep, (SIZE_T) (old_end - keep), MEM_DECOMMIT)) {
+        err = "resident-after-load: tail MEM_DECOMMIT failed (" + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    capacity = keep;  // mapping_base/mapping_bytes still own the original reservation for MEM_RELEASE.
+    if (whole_pin) {
+        if (cudaHostRegister(base, (size_t) keep, cudaHostRegisterPortable | cudaHostRegisterMapped) == cudaSuccess)
+            registered_bytes = keep;
+        else (void) cudaGetLastError();  // a pin refusal may fall back to a working-set lock, not a new allocation
+    }
+    const uint64_t unpinned_off = slice_bytes ? registered_bytes : 0;
+    const uint64_t to_lock = whole_pin && registered_bytes > 0 ? 0 : keep - unpinned_off;
+    const char* lock_env = std::getenv("STRATA_ARENA_LOCK");
+    if (to_lock && (lock_env == nullptr || std::string(lock_env) != "0")) {
+        SIZE_T min_ws = 0, max_ws = 0;
+        DWORD flags = 0;
+        const SIZE_T margin = (SIZE_T) 512 << 20;
+        const SIZE_T target = (SIZE_T) to_lock + margin;
+        // Reuse the allowance raised by the ordinary loader; don't add another arena to its minimum.
+        if (GetProcessWorkingSetSizeEx(GetCurrentProcess(), &min_ws, &max_ws, &flags) &&
+            (min_ws >= target || SetProcessWorkingSetSizeEx(GetCurrentProcess(), target,
+                max_ws > target + margin ? max_ws : target + margin,
+                QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE))) {
+            while (locked_bytes < to_lock) {
+                const uint64_t left = to_lock - locked_bytes;
+                const uint64_t n = left < (1ull << 30) ? left : (1ull << 30);
+                if (!VirtualLock((uint8_t*) base + unpinned_off + locked_bytes, (SIZE_T) n)) break;
+                locked_bytes += n;
+            }
+        }
+    }
+    note = "resident-after-load: committed " + std::to_string(keep >> 20) + " MiB, CUDA-pinned " +
+           std::to_string(registered_bytes >> 20) + " MiB, Windows-locked " +
+           std::to_string(locked_bytes >> 20) + " MiB, pageable " +
+           std::to_string((keep - registered_bytes - locked_bytes) >> 20) + " MiB";
+    return true;
+#else
+    (void) keep_bytes;
+    err = "resident-after-load is currently Windows-only";
+    return false;
+#endif
 }
 
 PinnedArena::~PinnedArena() {

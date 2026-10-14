@@ -48,6 +48,8 @@ namespace strata::core {
 class PeerExperts;   // multi-GPU: the second GPU's expert tier (peer_experts.hpp)
 class RemoteExperts;
 struct LoadStats;
+struct PinnedArena;
+class ArenaExpertSource;
 
 namespace detail {
 
@@ -117,6 +119,16 @@ bool make_cache_complement_plan(
     const std::vector<std::pair<int32_t, int32_t>>& primary_gpu_pairs,
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs,
     std::vector<uint64_t>& offsets, uint64_t& bytes, std::string& err);
+
+/// Validate all moves before writing; a natural-order plan can compact the loaded arena in place.
+bool compact_cache_complement_in_place(uint8_t* base, uint64_t capacity, int64_t n_expert,
+    const std::vector<uint64_t>& layer_offsets, const std::vector<uint64_t>& layer_blob_bytes,
+    const std::vector<uint64_t>& offsets, uint64_t bytes, uint64_t padding, std::string& err);
+
+/// CUDA aliases describe ADDRESS ranges, not the expert/layer layout before compaction.
+struct RegisteredSlice { uint64_t start, end; const uint8_t* device; };
+const uint8_t* registered_slice_alias(const std::vector<RegisteredSlice>& slices,
+                                    uint64_t offset, uint64_t transfer_bytes);
 
 /// Resolve one blob through the compact copy when present, otherwise preserve its exact mapped-file fallback.
 const uint8_t* cache_complement_blob_or_fallback(
@@ -525,7 +537,7 @@ void expert_hit_run(void* user, void* stream, HitPhase phase, const int32_t* ids
 /// token - which is the only way they get debugged before speed matters.
 class FileExpertSource : public ExpertSource {
 public:
-    FileExpertSource() = default;
+    FileExpertSource();
     ~FileExpertSource() override;
     FileExpertSource(const FileExpertSource&) = delete;
     FileExpertSource& operator=(const FileExpertSource&) = delete;
@@ -571,6 +583,10 @@ public:
         const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {}, int64_t lend_from_slot = -1,
         uint64_t headroom_bytes = 8ull << 30, uint64_t budget_bytes = 0,
         const std::vector<std::pair<int32_t, int32_t>>* rank = nullptr);
+    /// Startup-only adoption of the ordinary loaded arena. No second arena or expert-file reread.
+    /// Keep all cache misses AND the full lend tail; failure requires aborting startup.
+    bool adopt_loaded_arena(ArenaExpertSource& arena, const ExpertCache& cache, std::string& err,
+                            int64_t lend_from_slot = -1, uint64_t headroom_bytes = 4ull << 30);
     /// A layer split: the prompt path borrows the TAIL SLOTS of every stage's cache - CUDA0's own part
     /// first, then every stage in order.  Set these BEFORE `pin_cache_complement` to keep those slots' experts
     /// in the RAM copy too: each region lists its stage's (layer, expert) pairs, the highest cache slot first,
@@ -853,6 +869,9 @@ private:
     int64_t n_expert_ = 0;
     uint64_t mapped_bytes_ = 0;
     std::vector<uint64_t> layer_offsets_, layer_blob_bytes_;
+    std::unique_ptr<PinnedArena> adopted_arena_;  ///< typed VirtualAlloc owner; never free/cudaFreeHost this backing
+    std::vector<detail::RegisteredSlice> adopted_slices_;
+    uint64_t adopted_copy_span_ = 0;  ///< whole-slot copies may transfer max_blob, not just this layer's bytes
     void* complement_arena_ = nullptr;
     const uint8_t* complement_host_ = nullptr;
     const uint8_t* complement_device_ = nullptr;
@@ -917,7 +936,7 @@ public:
     /// Allocates and loads `<pack_dir>/experts.bin`.  Prints nothing; the caller reports `note()` and the load
     /// rate, because those are the two numbers that say whether the arena is the one that was asked for.
     bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads, std::string& err,
-              uint64_t max_pinned_bytes = 0, const std::string& shared_arena_file = {});
+              uint64_t max_pinned_bytes = 0, const std::string& shared_arena_file = {}, bool normal_pages = false);
     /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's GGUF: `native` is the
     /// --native shard, and native_experts.txt names the other shards beside it (per layer, or per role in v4).
     void set_gguf(const std::string& native) { gguf_ = native; }
@@ -946,6 +965,7 @@ public:
     double load_copy_seconds() const { return load_copy_s_; }
 
 private:
+    friend class FileExpertSource;  // the startup-only adoption transfers this typed owner
     void* arena_ = nullptr;          ///< the PinnedArena, owned
     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;

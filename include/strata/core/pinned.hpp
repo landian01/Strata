@@ -51,7 +51,7 @@ struct PinnedArena {
     /// small header and is refused when its stored hash does not match.  Empty `shared_file` preserves the
     /// existing allocation path.  Population/coordination and backing-file lifetime remain the caller's job.
     PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, uint64_t max_pinned_bytes = 0,
-                const std::string& shared_file = {}, uint64_t shared_pack_hash = 0);
+                const std::string& shared_file = {}, uint64_t shared_pack_hash = 0, bool normal_pages = false);
     /// #285: reserve only; the caller registers the slices with register_slices(), on a thread, while its readers
     /// fill the ones already registered (one registration of the whole arena cost ~2.5 s at 33 GiB of 4 KB pages).
     struct Deferred {};
@@ -63,6 +63,9 @@ struct PinnedArena {
     std::vector<uint64_t> slice_starts;
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
+    /// Startup-only, Windows normal pages: release committed tail, retain complete CUDA slices.
+    /// On failure the caller must abort startup (registration metadata can already have changed).
+    bool trim_prefix(uint64_t keep_bytes, std::string& err);
     ~PinnedArena();
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;

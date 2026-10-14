@@ -435,6 +435,7 @@ struct Options {
     /// is reserved for a host thread that has nothing to do while the drain runs.
     bool no_host_worker = false;
     bool coupled_draft = strata::core::coupled_draft_env(); ///< Coupled draft sampling for MTP drafter under sampling
+    bool resident_after_load = false; ///< opt-in: ordinary load, in-place duplicate removal, resident runtime
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     std::string shared_expert_arena; ///< Linux: optional file backing for the resident arena shared by processes
     bool resident_cpu_experts = false; ///< mmap-backed static-cache misses copied into ordinary RAM
@@ -917,6 +918,9 @@ void usage() {
                  "  --resident-experts   the low-RAM PC's resident mode (setup): --mmap-experts --resident-cpu-experts\n"
                  "                       with the copy page-locked when possible, 4 GiB headroom, plain mmap if it\n"
                  "                       does not fit.  Same answers as --mmap-experts for the same placement.\n"
+                 "  --resident-after-load  Windows, one GPU: load the ordinary arena, fill the static GPU cache,\n"
+                 "                       compact away stable GPU duplicates and decommit the tail, then use resident\n"
+                 "                       RAM/exchanges. No second arena; retain prompt-loan copies; 4 GiB headroom.\n"
                  "  --adapt-min-gain F   the adaptive tier swaps an expert in only when its decayed routing count beats\n"
                  "                       the one it replaces by more than F (default 1.5; higher = fewer, surer swaps)\n"
                  "  --adapt-async 1      --serve with the resident RAM mode (opt-in): the adaptive tier's swaps\n"
@@ -2145,6 +2149,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile-save-every")
             o.expert_profile_save_min = std::atof(next("--expert-profile-save-every"));
         else if (a == "--gpu-stages") o.gpu_stages = true;
+        else if (a == "--resident-after-load") o.resident_after_load = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--shared-expert-arena") o.shared_expert_arena = next("--shared-expert-arena");
         else if (a == "--resident-cpu-experts") o.resident_cpu_experts = o.resident_cpu_explicit = true;
@@ -2357,6 +2362,25 @@ int main(int argc, char** argv) {
     }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
                                o.expert_cache_remote[2] > 0;
+    if (o.resident_after_load) {
+#if !defined(_WIN32) || defined(STRATA_USE_HIP) || defined(STRATA_USE_SYCL)
+        std::fprintf(stderr, "strata generate: --resident-after-load currently requires Windows/CUDA\n");
+        return 2;
+#else
+        const char* grow = std::getenv("STRATA_KV_GROW");
+        const bool effective_grow = grow != nullptr && grow[0] != '\0' ? grow[0] != '0' : o.kv_grow;
+        const bool helpers = remote_caches || std::any_of(o.expert_cache_remote_auto.begin(),
+            o.expert_cache_remote_auto.end(), [](bool on) { return on; });
+        if (o.mmap_experts || o.resident_cpu_experts || o.resident_budget || !o.shared_expert_arena.empty() ||
+            !o.layer_split.empty() || helpers || o.peer_device >= 0 || o.remote_expert_opt || o.gpu_stages ||
+            effective_grow || o.vram_elastic || o.no_pool || o.graph_only || o.gpu_only_full ||
+            o.expert_profile.empty() || o.expert_cache == 0) {
+            std::fprintf(stderr, "strata generate: --resident-after-load requires an ordinary single-GPU static "
+                                 "profile/cache; no mmap/resident-budget, split/helper/peer, KV-grow or VRAM-elastic modes\n");
+            return 2;
+        }
+#endif
+    }
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
     // swap copies an evicted expert back from the card that owns its layer (resident_stage_swaps).
     if (o.resident_cpu_experts && remote_caches) {
@@ -4765,7 +4789,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
                                  "(STRATA_ARENA_PIN_GIB changes it)\n");
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit,
-                            o.shared_expert_arena)) {
+                            o.shared_expert_arena, o.resident_after_load)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -5562,35 +5586,38 @@ int main(int argc, char** argv) {
                           [] { const char* v = std::getenv("STRATA_FS_AHEAD"); return v == nullptr || std::atoi(v) != 0; }();
     // STRATA_LOOKAHEAD_STATS=1 (measurement only): run the predictor on any tier and score it against the real routing
     const bool la_stats = srcp != nullptr && [] { const char* v = std::getenv("STRATA_LOOKAHEAD_STATS"); return v != nullptr && std::atoi(v) != 0; }();
-    if (srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead || la_stats) &&
-        [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
-        std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
-        bool ok = true;
-        for (int64_t l = 0; l < g.n_layers && ok; ++l) {
-            const strata::core::WeightRef* w = wt.find("blk." + std::to_string(l) + ".ffn_gate_inp.weight");
-            ok = w != nullptr && w->kind == strata::core::WeightKind::Bf16InF32 &&
-                 w->bytes == (uint64_t) (g.n_expert * g.n_embd) * 2;
-            if (!ok) break;
-            routers[(size_t) l].resize((size_t) (g.n_expert * g.n_embd));
-            ok = cudaMemcpy(routers[(size_t) l].data(), w->data, (size_t) w->bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    auto start_lookahead = [&]() {
+        if (srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead || la_stats) &&
+            [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
+            std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
+            bool ok = true;
+            for (int64_t l = 0; l < g.n_layers && ok; ++l) {
+                const strata::core::WeightRef* w = wt.find("blk." + std::to_string(l) + ".ffn_gate_inp.weight");
+                ok = w != nullptr && w->kind == strata::core::WeightKind::Bf16InF32 &&
+                     w->bytes == (uint64_t) (g.n_expert * g.n_embd) * 2;
+                if (!ok) break;
+                routers[(size_t) l].resize((size_t) (g.n_expert * g.n_embd));
+                ok = cudaMemcpy(routers[(size_t) l].data(), w->data, (size_t) w->bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+            }
+            const char* kv = std::getenv("STRATA_LOOKAHEAD_K");
+            if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? std::atoi(kv) : 10, srcp, err, fs_ahead || la_stats)) {
+                drive.d.lookahead = &lookahead;
+                if (la_stats) lookahead.enable_stats(g.n_layers);
+                if (const char* dv = std::getenv("STRATA_IO_PREFETCH_DEPTH"); dv != nullptr && std::atoi(dv) > 0)
+                    lookahead.set_depth(std::atoi(dv));
+                else if (srcp == &src && src.io_prefetch())
+                    lookahead.set_depth(2);
+                std::fprintf(stderr, "strata generate: routing-aware prefetch on (the next layer's router%s)\n",
+                             fs_ahead ? ", feeding the Foresight swap space" : ", file tier");
+            } else {
+                (void) cudaGetLastError();
+                std::fprintf(stderr, "strata generate: routing-aware prefetch off (%s)\n",
+                             ok ? err.c_str() : "the routers are not BF16 in the arena");
+                err.clear();
+            }
         }
-        const char* kv = std::getenv("STRATA_LOOKAHEAD_K");
-        if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? std::atoi(kv) : 10, srcp, err, fs_ahead || la_stats)) {
-            drive.d.lookahead = &lookahead;
-            if (la_stats) lookahead.enable_stats(g.n_layers);
-            if (const char* dv = std::getenv("STRATA_IO_PREFETCH_DEPTH"); dv != nullptr && std::atoi(dv) > 0)
-                lookahead.set_depth(std::atoi(dv));
-            else if (srcp == &src && src.io_prefetch())
-                lookahead.set_depth(2);
-            std::fprintf(stderr, "strata generate: routing-aware prefetch on (the next layer's router%s)\n",
-                         fs_ahead ? ", feeding the Foresight swap space" : ", file tier");
-        } else {
-            (void) cudaGetLastError();
-            std::fprintf(stderr, "strata generate: routing-aware prefetch off (%s)\n",
-                         ok ? err.c_str() : "the routers are not BF16 in the arena");
-            err.clear();
-        }
-    }
+    };
+    if (!o.resident_after_load) start_lookahead();
     // ---- R4.2c: THE HIT PATH.  Every one of these is required for `hits_ready()`, which is all-or-nothing on
     // purpose: a half-configured hit path would compute some experts twice and others not at all, and a token
     // built on that is wrong rather than refused.
@@ -6666,6 +6693,67 @@ int main(int argc, char** argv) {
                              "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
         return true;
     };
+    int64_t resident_keep_from = xcache.slots();
+    std::unique_ptr<uint8_t, decltype(&cudaFreeHost)> refill_bounce(nullptr, &cudaFreeHost);
+    // Adopted blobs can straddle the old registration boundaries. One owned, pinned bounce is
+    // reused ONLY after a blocking fill, never overwritten under a queued transfer.
+    auto refill_slot = [&](strata::core::ExpertCache& cache, int32_t slot, int64_t layer, int64_t expert,
+                           bool blocking, std::string& e) -> bool {
+        const int64_t bb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+        if (o.resident_after_load && !src.has_resident(layer, expert)) {
+            e = "resident-after-load: refill violates retained RAM coverage";
+            return false;
+        }
+        if (o.resident_after_load && !srcp->pinned(layer, expert)) {
+            if (!refill_bounce || !srcp->copy_blob(layer, expert, refill_bounce.get())) {
+                e = "resident-after-load: boundary-safe refill staging failed";
+                return false;
+            }
+            return cache.fill_slot_blocking(slot, refill_bounce.get(), e, bb);
+        }
+        const uint8_t* b = srcp->blob_stable(layer, expert);
+        if (!b) { e = "refill: source expert unavailable"; return false; }
+        const bool ok = blocking ? cache.fill_slot_blocking(slot, b, e, bb)
+                                 : cache.fill_slot_queued(slot, b, e, bb);
+        if (ok && !blocking) srcp->note_async_read(b, nullptr);
+        return ok;
+    };
+    auto adaptive_copy = [&](void* dst, const uint8_t* blob, int64_t layer, int64_t expert,
+                             size_t bytes, cudaStream_t stream) -> cudaError_t {
+        if (o.resident_after_load) {
+            if (!src.has_resident(layer, expert)) return cudaErrorInvalidValue;
+            if (!srcp->pinned(layer, expert)) {
+                if (!refill_bounce || !srcp->copy_blob(layer, expert, refill_bounce.get()))
+                    return cudaErrorInvalidValue;
+                const cudaError_t copied = cudaMemcpyAsync(dst, refill_bounce.get(), bytes,
+                                                           cudaMemcpyHostToDevice, stream);
+                return copied == cudaSuccess ? cudaStreamSynchronize(stream) : copied;
+            }
+        }
+        return adapt_copy_h2d(dst, blob, bytes, stream);
+    };
+    if (o.resident_after_load) {
+        uint8_t* bounce = nullptr;
+        const cudaError_t pin = cudaHostAlloc((void**) &bounce,
+            (size_t) strata::kernels::cpu::expert_layout().max_blob, cudaHostAllocPortable);
+        if (pin != cudaSuccess) {
+            std::fprintf(stderr, "strata generate: resident-after-load: refill bounce allocation: %s\n",
+                         cudaGetErrorString(pin));
+            (void) cudaGetLastError();
+            return 1;
+        }
+        refill_bounce.reset(bounce);
+        // Selection stayed ordinary through arena loading, GPU filling, capture and lend sizing.
+        src.set_gguf(o.native_preset);
+        if (const char* v = std::getenv("STRATA_FETCH_THREADS"); v != nullptr && std::atoi(v) > 0)
+            src.set_fetch_threads(std::atoi(v));
+        if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
+            std::fprintf(stderr, "strata generate: resident-after-load: %s\n", err.c_str());
+            return 1;
+        }
+        o.mmap_experts = o.resident_cpu_experts = o.resident_pin = true;
+        o.resident_headroom = 4ull << 30;  // independent of old resident-mode environment overrides
+    }
     // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
     // hold are copied from experts.bin into RAM once, so no decode or prompt step reads the file (the plain mmap
     // mode reads them through the OS file cache, which a small-RAM PC keeps giving back to the SSD).  Built here,
@@ -6790,8 +6878,16 @@ int main(int argc, char** argv) {
             src.stage_lend_regions(std::move(stage_lends));
         }
         const std::vector<std::pair<int32_t, int32_t>>& rank_all = profile_all.empty() ? profile : profile_all;
-        bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, lend_from,
-                                                    o.resident_headroom, o.resident_budget, &rank_all);
+        bool resident_ok = o.resident_after_load
+            ? src.adopt_loaded_arena(arena_src, xcache, err, lend_from, o.resident_headroom)
+            : src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, lend_from,
+                                       o.resident_headroom, o.resident_budget, &rank_all);
+        if (resident_ok && o.resident_after_load) {
+            srcp = &src;
+            drive.d.src = srcp;  // captured graphs call Drive, not a stale ArenaExpertSource pointer
+            resident_keep_from = lend_from >= 0 ? lend_from : xcache.slots();
+            start_lookahead();  // only now may a worker retain this source
+        }
         std::string whole_err;
         if (!resident_ok && o.resident_soft) {
             // #467: the whole complement does not fit - keep what does, the hottest by the profile, through the #403
@@ -6823,7 +6919,7 @@ int main(int argc, char** argv) {
         // #669 / #765: a big chunk lends many cache slots to the prompt path, and each lent slot's expert is read back
         // from the SSD whenever the RAM could not keep its copy (31 GB: auto:32768 read prompts ~3x slower than auto).
         // Said, never capped: --prefill is the user's, and with the RAM for them it is the faster one (+21-35%).
-        if (resident_ok && lend_from >= 0 && o.prefill_chunk > 8192 && xcache.slots() > lend_from &&
+        if (resident_ok && !o.resident_after_load && lend_from >= 0 && o.prefill_chunk > 8192 && xcache.slots() > lend_from &&
             src.resident_lent_slots() < xcache.slots() - lend_from)
             std::fprintf(stderr, "strata generate: WARNING: a prompt chunk of %lld tokens lends %lld cache slots to the "
                                  "prompt path, but only %lld of their experts fit in RAM: the others are read from the "
@@ -6845,9 +6941,19 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
                 return 1;
             }
+            if (o.resident_after_load) {
+                strata::core::detail::HostMemory hm;
+                if (!strata::core::detail::host_available_memory(hm) || hm.commit == UINT64_MAX ||
+                    hm.available < o.resident_headroom || hm.commit < o.resident_headroom) {
+                    std::fprintf(stderr, "strata generate: resident-after-load: insufficient 4 GiB RAM/commit "
+                                         "headroom after exchange allocation\n");
+                    return 1;
+                }
+            }
             std::fprintf(stderr, "strata generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in the GPU "
                                  "cache; adaptive swaps %s\n",
                          (double) src.resident_bytes() / 1073741824.0,
+                         o.resident_after_load ? "pin/lock/pageable breakdown above" :
                          src.complement_pinned() ? "page-locked" : src.locked_bytes() > 0 ? "locked" : "pageable",
                          (long long) xcache.resident(),
                          o.adapt_every > 0 && o.adapt_swaps > 0 ? "exchange them with the GPU cache (no file reads)"
@@ -8523,7 +8629,8 @@ int main(int argc, char** argv) {
                 const int stn = multi_gpu ? stage_of(s.layer) : 0;   // the swap stays in the layer's own cache
                 GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
-                if (dma_mode != 0 && slot >= 0 && b != nullptr) {
+                if (dma_mode != 0 && slot >= 0 && b != nullptr &&
+                    (!o.resident_after_load || srcp->pinned(s.layer, s.in))) {
                     cp_dst.push_back(xcache.device_slot(slot));
                     cp_src.push_back(b);
                     cp_bytes.push_back((size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer));
@@ -8534,8 +8641,8 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (slot < 0 || b == nullptr ||
-                    adapt_copy_h2d(gs ? gs->cache.device_slot(slot) : xcache.device_slot(slot), b,
-                                   (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
+                    adaptive_copy(gs ? gs->cache.device_slot(slot) : xcache.device_slot(slot), b, s.layer, s.in,
+                                  (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
                                    gs ? gs->adapt_stream : adapt_stream) != cudaSuccess) {
                     std::fprintf(stderr, "strata serve: adaptive swap copy failed (layer %d, slot %d, pinned %d): %s\n",
                                  (int) s.layer, (int) slot, pin_live.empty() ? 0 : 1, cudaGetErrorString(cudaGetLastError()));
@@ -9265,13 +9372,10 @@ int main(int argc, char** argv) {
                         }
                     }
                     if (pick < 0) continue;
-                    const uint8_t* b = srcp->blob_stable(layer, pick % g.n_expert);
-                    if (b == nullptr || !xcache.fill_slot_queued(slot, b, ferr,
-                            (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer))) {
+                    if (!refill_slot(xcache, slot, layer, pick % g.n_expert, false, ferr)) {
                         e = "VRAM: refilling the cache failed: " + ferr;
                         return false;
                     }
-                    srcp->note_async_read(b, nullptr);   // #1237: the queued copy reads a stage buffer; it is not recycled under it
                     host_res[(size_t) pick] = slot;
                 }
                 vram_evicted.swap(keep_out);
@@ -10839,12 +10943,8 @@ int main(int argc, char** argv) {
                 tr("refill start", (long long) p.lent.size());
                 const strata::core::OnDevice on(p.dev);
                 for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
-                    const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
-                    const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
-                    if (b == nullptr || !(refill_blocking() ? p.cache->fill_slot_blocking(slot, b, e, nb)
-                                                            : p.cache->fill_slot_queued(slot, b, e, nb)))
-                        return false;
-                    if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
+                    if (!refill_slot(*p.cache, slot, i / g.n_expert, i % g.n_expert,
+                                     refill_blocking(), e)) return false;
                     host_res[(size_t) i] = slot;
                 }
                 return true;
@@ -10926,11 +11026,15 @@ int main(int argc, char** argv) {
                     // lent even then is halved until it can, instead of ending the engine.
                     int64_t want_p = want;
                     int64_t need_p = part_slots(p, want_p);
-                    while ((need_p <= 0 || need_p + 128 > p.cache->slots()) && want_p > 256) {
+                    auto loan_fits = [&]() {
+                        return need_p > 0 && need_p + 128 <= p.cache->slots() &&
+                            (!o.resident_after_load || p.cache->slots() - need_p >= resident_keep_from);
+                    };
+                    while (!loan_fits() && want_p > 256) {
                         want_p = std::max<int64_t>(256, want_p / 2 / 256 * 256);
                         need_p = part_slots(p, want_p);
                     }
-                    if (need_p <= 0 || need_p + 128 > p.cache->slots()) {
+                    if (!loan_fits()) {
                         e = "prefill: no chunk of this request fits the slots that can be lent (#2090)";
                         return false;
                     }
@@ -12452,6 +12556,9 @@ int main(int argc, char** argv) {
                                      "%.1f MB read%s\n", (long long) req_hits, (long long) src.ram_reads(),
                              (long long) src.file_reads(), (double) src.file_read_bytes() / 1e6,
                              src.gguf_mode() ? " (the GGUF in place)" : "");
+                if (o.resident_after_load)
+                    std::fprintf(stderr, "strata serve: resident-after-load: file_reads=%lld file_read_bytes=%llu\n",
+                                 (long long) src.file_reads(), (unsigned long long) src.file_read_bytes());
                 // what the OS did for this request (since the previous one): the drive's share of the file tier's reads
                 // against the page cache's, and what the I/O path did about it
                 static strata::platform::ProcIo io_prev;
@@ -12578,6 +12685,18 @@ int main(int argc, char** argv) {
                 if (k + 128 > xcache.slots()) k = 0;
                 if (!o.prefill_auto) o.prefill_chunk = chunk;
             }
+            if (o.resident_after_load && k > 0) {
+                // #2090: a smaller request can need MORE ring slots. Never borrow omitted RAM copies.
+                while (k > xcache.slots() - resident_keep_from && chunk > 256) {
+                    chunk = std::max<int64_t>(256, chunk / 2 / 256 * 256);
+                    k = lend_slots(chunk);
+                }
+                if (k <= 0 || k > xcache.slots() - resident_keep_from) {
+                    std::fprintf(stderr, "strata generate: resident-after-load: prompt loan exceeds retained tail\n");
+                    return 1;
+                }
+                o.prefill_chunk = chunk;
+            }
             if (o.prefill_auto) {
                 o.prefill_chunk = k > 0 ? chunk : request_chunk(n_batched, 1024);
                 std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
@@ -12640,14 +12759,10 @@ int main(int argc, char** argv) {
         if (!lent.empty()) {
             const Clock::time_point tr = Clock::now();
             for (const auto& [i, slot] : lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
-                const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
-                const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
-                if (b == nullptr || !(refill_blocking() ? xcache.fill_slot_blocking(slot, b, err, nb)
-                                                        : xcache.fill_slot_queued(slot, b, err, nb))) {
+                if (!refill_slot(xcache, slot, i / g.n_expert, i % g.n_expert, refill_blocking(), err)) {
                     std::fprintf(stderr, "strata generate: refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
                 }
-                if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
                 host_res[(size_t) i] = slot;
             }
             if (!xcache.sync_queued(err)) {
@@ -13081,11 +13196,11 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
                     return false;
                 }
-                if (dma_mode != 0) {
+                if (dma_mode != 0 && (!o.resident_after_load || srcp->pinned(s.layer, s.in))) {
                     cp_dst.push_back(xcache.device_slot(slot));
                     cp_src.push_back(b);
                     cp_bytes.push_back(blob_n);
-                } else if (adapt_copy_h2d(xcache.device_slot(slot), b, blob_n, adapt_stream) != cudaSuccess) {
+                } else if (adaptive_copy(xcache.device_slot(slot), b, s.layer, s.in, blob_n, adapt_stream) != cudaSuccess) {
                     std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
                     return false;
                 }

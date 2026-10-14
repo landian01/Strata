@@ -206,6 +206,60 @@ bool make_cache_complement_plan(
     return true;
 }
 
+bool compact_cache_complement_in_place(uint8_t* base, uint64_t capacity, int64_t n_expert,
+    const std::vector<uint64_t>& layer_offsets, const std::vector<uint64_t>& layer_blob_bytes,
+    const std::vector<uint64_t>& offsets, uint64_t bytes, uint64_t padding, std::string& err) {
+    err.clear();
+    if (!base || n_expert <= 0 || layer_offsets.size() != layer_blob_bytes.size() || layer_offsets.empty() ||
+        layer_offsets.size() > SIZE_MAX / (uint64_t) n_expert ||
+        offsets.size() != layer_offsets.size() * (size_t) n_expert ||
+        capacity > SIZE_MAX || bytes > capacity || padding > capacity - bytes) {
+        err = "resident-after-load: invalid compaction geometry/capacity";
+        return false;
+    }
+    uint64_t dest = 0, previous_end = 0;
+    for (size_t l = 0; l < layer_offsets.size(); ++l) {
+        const uint64_t bb = layer_blob_bytes[l], start = layer_offsets[l];
+        if (!bb || start < previous_end || start > capacity || (uint64_t) n_expert > (capacity - start) / bb) {
+            err = "resident-after-load: invalid or overlapping original layer spans";
+            return false;
+        }
+        previous_end = start + (uint64_t) n_expert * bb;
+        for (int64_t e = 0; e < n_expert; ++e) {
+            const uint64_t off = offsets[l * (size_t) n_expert + (size_t) e];
+            if (off == kNoCacheComplement) continue;
+            const uint64_t original = start + (uint64_t) e * bb;
+            if (off != dest || off > original || dest > bytes || bb > bytes - dest) {
+                err = "resident-after-load: compaction plan is not a bounded natural-order prefix";
+                return false;
+            }
+            dest += bb;
+        }
+    }
+    if (dest != bytes) { err = "resident-after-load: compaction byte total differs"; return false; }
+    // No changes above: a malformed/reordered plan cannot corrupt an unread source blob.
+    for (size_t l = 0; l < layer_offsets.size(); ++l)
+        for (int64_t e = 0; e < n_expert; ++e) {
+            const uint64_t off = offsets[l * (size_t) n_expert + (size_t) e];
+            if (off != kNoCacheComplement)
+                std::memmove(base + (size_t) off, base + (size_t) (layer_offsets[l] + e * layer_blob_bytes[l]),
+                             (size_t) layer_blob_bytes[l]);
+        }
+    std::memset(base + (size_t) bytes, 0, (size_t) padding);
+    return true;
+}
+
+const uint8_t* registered_slice_alias(const std::vector<RegisteredSlice>& slices,
+                                    uint64_t offset, uint64_t transfer_bytes) {
+    if (!transfer_bytes) return nullptr;
+    const auto end = std::upper_bound(slices.begin(), slices.end(), offset,
+        [](uint64_t off, const RegisteredSlice& slice) { return off < slice.start; });
+    if (end == slices.begin()) return nullptr;
+    const RegisteredSlice& slice = *(end - 1);
+    if (!slice.device || offset >= slice.end || transfer_bytes > slice.end - offset) return nullptr;
+    return slice.device + (size_t) (offset - slice.start);
+}
+
 const uint8_t* cache_complement_blob_or_fallback(
     size_t index, const std::vector<uint64_t>& offsets, const uint8_t* complement_host,
     const uint8_t* mapped_fallback) {
@@ -534,6 +588,7 @@ bool file_tier_unbuffered(const std::vector<std::string>& paths, uint64_t arena_
 
 // ================================ THE FILE-BACKED SOURCE ================================
 
+FileExpertSource::FileExpertSource() = default;
 FileExpertSource::~FileExpertSource() { close(); }
 
 #if defined(__linux__)
@@ -977,6 +1032,9 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
 void FileExpertSource::close() {
     io_stop();
     inputs_.clear();
+    adopted_arena_.reset();  // PinnedArena unregisters slices/unlocks and releases VirtualAlloc correctly
+    adopted_slices_.clear();
+    adopted_copy_span_ = 0;
     if (complement_arena_ != nullptr) {
         if (complement_pinned_ && !complement_registered_) (void) cudaFreeHost(complement_arena_);
         else {
@@ -2114,6 +2172,9 @@ bool FileExpertSource::read_direct(const Fill* fills, size_t n) const {
 }
 
 void FileExpertSource::warm(int64_t layer, const int64_t* experts, int64_t n) {
+    // All misses are held by the adopted arena or staged exchange buffers.
+    // File hints during a staged residency flip would only duplicate those bytes.
+    if (adopted_arena_ && complement_ready_) return;
     if ((role_ptr_.empty() && !io_pf_) || n <= 0 || layer < 0 || layer >= n_layers_) return;
     uint32_t stamp;
     {
@@ -3217,6 +3278,137 @@ const uint8_t* FileExpertSource::resident_blob(size_t index) const {
     return detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
 }
 
+bool FileExpertSource::adopt_loaded_arena(ArenaExpertSource& arena, const ExpertCache& cache,
+    std::string& err, int64_t lend_from_slot, uint64_t headroom_bytes) {
+    err.clear();
+#ifndef _WIN32
+    (void) arena; (void) cache; (void) lend_from_slot; (void) headroom_bytes;
+    err = "resident-after-load is currently Windows-only";
+    return false;
+#else
+    const auto t0 = std::chrono::steady_clock::now();
+    PinnedArena* a = (PinnedArena*) arena.arena_;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    if (!base_ || complement_ready_ || !a || a->backing != PageBacking::NormalPages ||
+        arena.map_ || arena.blobs_ != blobs_ || arena.n_expert_ != n_expert_ || !stage_lend_regions_.empty() ||
+        !cache.valid() || cache.resident() <= 0 || cache.resident() != cache.slots() ||
+        cache.fills() != cache.resident()) {
+        err = "resident-after-load requires matching ordinary arena and fully filled single-GPU static cache";
+        return false;
+    }
+    const int64_t slots = cache.slots();
+    if (lend_from_slot < 0) lend_from_slot = slots;
+    if (lend_from_slot > slots) { err = "resident-after-load: invalid lend tail"; return false; }
+    if (headroom_bytes < (4ull << 30) || slots <= 0 || lay.n_layers != n_layers_ || lay.n_expert != n_expert_ ||
+        lay.max_blob == 0) { err = "resident-after-load: incompatible layout/headroom"; return false; }
+    std::vector<std::pair<int32_t, int32_t>> remove;
+    std::vector<bool> occupied((size_t) slots, false);
+    int64_t lent = 0, held = 0;
+    for (int64_t l = 0; l < n_layers_; ++l)
+        for (int64_t e = 0; e < n_expert_; ++e) {
+            const int32_t slot = cache.slot_of(l, e);
+            if (slot < 0) continue;
+            ++held;
+            if (slot >= slots || occupied[(size_t) slot]) {
+                err = "resident-after-load: invalid/duplicate GPU slot"; return false;
+            }
+            occupied[(size_t) slot] = true;
+            if (slot >= lend_from_slot) ++lent;  // borrowing needs these RAM copies even though the GPU holds them
+            else remove.emplace_back((int32_t) l, (int32_t) e);
+        }
+    if (held != cache.resident()) { err = "resident-after-load: cache geometry differs"; return false; }
+    std::vector<uint64_t> offsets;
+    uint64_t bytes = 0;
+    if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, remove, {}, offsets, bytes, err))
+        return false;
+    for (int64_t l = 0; l < n_layers_; ++l)
+        if (layer_offsets_[(size_t) l] != lay.layer_offset(l) ||
+            layer_blob_bytes_[(size_t) l] != lay.blob_bytes(l)) {
+            err = "resident-after-load: canonical source geometry differs"; return false;
+        }
+    const uint64_t old_capacity = a->capacity;
+    if (bytes > old_capacity || lay.max_blob > old_capacity - bytes) {
+        err = "resident-after-load: retained payload/padding exceed arena"; return false;
+    }
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const uint64_t page = si.dwPageSize;
+    if (!page || old_capacity > UINT64_MAX - (page - 1)) {
+        err = "resident-after-load: committed size overflow"; return false;
+    }
+    const uint64_t old_end = (old_capacity + page - 1) / page * page;
+    const uint64_t keep_end = (bytes + lay.max_blob + page - 1) / page * page;
+    const uint64_t reclaim = old_end - keep_end;
+    detail::HostMemory projected;
+    if (!detail::host_available_memory(projected) || projected.commit == UINT64_MAX ||
+        (projected.available < headroom_bytes && reclaim < headroom_bytes - projected.available) ||
+        (projected.commit < headroom_bytes && reclaim < headroom_bytes - projected.commit)) {
+        err = "resident-after-load: even projected tail reclaim cannot preserve RAM/commit headroom";
+        return false;
+    }
+    // The physical projection is optimistic (some tail pages may already be paged out); recheck after trim.
+    std::vector<detail::RegisteredSlice> slices;
+    slices.reserve(a->slice_starts.size() + 1);  // allocate metadata BEFORE destructive compaction
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        err = "resident-after-load: GPU copies not ready";
+        (void) cudaGetLastError();
+        return false;
+    }
+    // There are no source readers/lookahead workers during this startup-only transition.
+    if (!detail::compact_cache_complement_in_place(a->data(), a->capacity, n_expert_, layer_offsets_,
+            layer_blob_bytes_, offsets, bytes, lay.max_blob, err) || !a->trim_prefix(bytes + lay.max_blob, err))
+        return false;  // caller must abort; the old layout is no longer valid
+    const size_t count = a->slice_bytes ? a->slice_starts.size() : (a->registered_bytes ? 1 : 0);
+    for (size_t i = 0; i < count; ++i) {
+        const uint64_t start = a->slice_bytes ? a->slice_starts[i] : 0;
+        const uint64_t end = i + 1 < count ? a->slice_starts[i + 1] : a->registered_bytes;
+        void* d = nullptr;
+        if (cudaHostGetDevicePointer(&d, a->data() + start, 0) != cudaSuccess) {
+            (void) cudaGetLastError();
+            d = nullptr;  // registered does not prove usable mapping; bounce copies remain valid
+        }
+        slices.push_back({start, end, (const uint8_t*) d});
+    }
+    detail::HostMemory hm;
+    if (!detail::host_available_memory(hm) || hm.commit == UINT64_MAX ||
+        hm.available < headroom_bytes || hm.commit < headroom_bytes) {
+        err = "resident-after-load: after decommit, RAM/commit headroom is below " +
+              std::to_string(headroom_bytes >> 30) + " GiB (RAM " + std::to_string(hm.available >> 20) +
+              " MiB, commit " + std::to_string(hm.commit >> 20) + " MiB)";
+        return false;
+    }
+    adopted_arena_.reset(a);
+    arena.arena_ = nullptr;
+    arena.base_ = nullptr;
+    arena.blobs_ = arena.n_expert_ = 0;
+    arena.dev_slice_.clear();
+    arena.pinned_bytes_ = arena.slice_bytes_ = 0;
+    adopted_slices_ = std::move(slices);
+    adopted_copy_span_ = lay.max_blob;
+    complement_host_ = a->data();
+    complement_device_ = nullptr;  // sliced aliases only: disable contiguous soft-commit and rotation paths
+    complement_bytes_ = bytes;
+    complement_offsets_ = std::move(offsets);
+    complement_pinned_ = a->registered_bytes > 0;
+    complement_partial_ = true;
+    complement_pin_limit_ = a->registered_bytes;
+    complement_locked_ = a->locked_bytes;
+    complement_lent_slots_ = lent;
+    complement_ready_ = true;
+    std::fprintf(stderr, "FileExpertSource: resident-after-load: removed %zu stable GPU duplicates, kept %lld lend "
+                         "copies; %.2f GiB -> %.2f GiB committed (%.2f GiB tail decommitted); no second arena; %.3f s\n",
+                 remove.size(), (long long) lent, (double) old_capacity / 1073741824.0,
+                 (double) a->capacity / 1073741824.0,
+                 (double) (old_capacity > a->capacity ? old_capacity - a->capacity : 0) / 1073741824.0,
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    std::fprintf(stderr, "FileExpertSource: %s; available RAM %.2f GiB, commit %.2f GiB\n", a->note.c_str(),
+                 (double) hm.available / 1073741824.0, (double) hm.commit / 1073741824.0);
+    std::fprintf(stderr, "FileExpertSource: cache complement ready: resident %.2f GiB, pinned %.2f GiB\n",
+                 (double) bytes / 1073741824.0, (double) a->registered_bytes / 1073741824.0);
+    return true;
+#endif
+}
+
 bool FileExpertSource::has_resident(int64_t layer, int64_t expert) const {
     if (!complement_ready_ || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
@@ -3451,12 +3643,19 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
     // soft_commit_exchanges: a staged `out` is judged by the place it will take (`in`'s), as after the commit
     const size_t at_index = !soft_in_.empty() && soft_in_[index] != SIZE_MAX ? soft_in_[index] : index;
     if (at_index >= complement_offsets_.size() || complement_offsets_[at_index] == kNoComplement) return false;
+    if (adopted_arena_) return detail::registered_slice_alias(adopted_slices_,
+        complement_offsets_[at_index], adopted_copy_span_) != nullptr;
     // a partial pin (CS-T): only the registered prefix
     return !complement_partial_ ||
            complement_offsets_[at_index] + layer_blob_bytes_[(size_t) layer] <= complement_pin_limit_;
 }
 
 const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) const {
+    if (adopted_arena_) {
+        if (!pinned(layer, expert)) return nullptr;
+        return detail::registered_slice_alias(adopted_slices_,
+            complement_offsets_[(size_t) layer * (size_t) n_expert_ + (size_t) expert], adopted_copy_span_);
+    }
     if (!pinned(layer, expert) || complement_device_ == nullptr) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     if (exchange_storage_.active()) return exchange_storage_.resident(index).device;
@@ -3467,6 +3666,11 @@ const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) con
 }
 
 bool FileExpertSource::pcie_layer(int64_t layer) const {
+    if (adopted_arena_) {
+        if (layer < 0 || layer >= n_layers_) return false;
+        for (int64_t e = 0; e < n_expert_; ++e) if (device_alias(layer, e)) return true;
+        return false;
+    }
     if (complement_ready_ && complement_pinned_ && complement_device_ != nullptr)
         return layer >= 0 && layer < n_layers_;
     return device_alias(layer, 0) != nullptr;
@@ -4405,7 +4609,7 @@ ArenaExpertSource::~ArenaExpertSource() { close(); }
 
 bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
                              std::string& err, uint64_t max_pinned_bytes,
-                             const std::string& shared_arena_file) {
+                             const std::string& shared_arena_file, bool normal_pages) {
     close();
     const std::string path = pack_dir + "/experts.bin";
     // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
@@ -4534,14 +4738,14 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     // fallback after the load) with identical output; the start-time gain does not pay for that.
 #ifdef _WIN32
     const char* defer_env = std::getenv("STRATA_DEFERRED_REGISTER");
-    const bool deferred = max_pinned_bytes == 0 && arena_pin_cap_gib() == -1 && shared_arena_file.empty() &&
+    const bool deferred = !normal_pages && max_pinned_bytes == 0 && arena_pin_cap_gib() == -1 && shared_arena_file.empty() &&
                           (defer_env != nullptr && defer_env[0] != 0 && defer_env[0] != '0');
 #else
     const bool deferred = false;
 #endif
     PinnedArena* a = deferred ? new PinnedArena(want + (uint64_t) blob, bounds, PinnedArena::Deferred{})
                               : new PinnedArena(want + (uint64_t) blob, bounds, max_pinned_bytes,
-                                                shared_arena_file, pack_hash);
+                                                shared_arena_file, pack_hash, normal_pages);
     if (!a->valid()) {
         const std::string why = a->note;
         delete a;

@@ -367,6 +367,156 @@ void test_resident_exchange() {
     require(offsets == before, "exchanging back did not restore the plan");
 }
 
+// --resident-after-load: tiny host-only fixtures, without CUDA allocation/registration or file I/O.
+void test_after_load_compaction() {
+    using namespace strata::core::detail;
+    constexpr int64_t experts = 3;
+    constexpr uint64_t padding = 5;
+    const std::vector<uint64_t> layer_offsets{0, 15}, blob_sizes{5, 3};
+    std::vector<uint8_t> original(24 + padding);
+    for (size_t i = 0; i < original.size(); ++i) original[i] = (uint8_t) (i + 1);
+
+    // Every subset: all/none, holes at each position, and both variable-size layers.
+    for (unsigned mask = 0; mask < (1u << 6); ++mask) {
+        std::vector<std::pair<int32_t, int32_t>> gpu;
+        std::vector<uint8_t> expected;
+        for (int32_t l = 0; l < 2; ++l)
+            for (int32_t e = 0; e < experts; ++e) {
+                if ((mask & (1u << (l * experts + e))) == 0) {
+                    gpu.emplace_back(l, e);
+                } else {
+                    const uint64_t source = layer_offsets[(size_t) l] + (uint64_t) e * blob_sizes[(size_t) l];
+                    expected.insert(expected.end(), original.begin() + (ptrdiff_t) source,
+                                    original.begin() + (ptrdiff_t) (source + blob_sizes[(size_t) l]));
+                }
+            }
+        std::vector<uint64_t> offsets;
+        uint64_t bytes = 0;
+        std::string err;
+        const bool planned = make_cache_complement_plan(2, experts, blob_sizes, gpu, {}, offsets, bytes, err);
+        const std::string context = "after-load subset " + std::to_string(mask);
+        require(planned, context + ": " + err);
+        require(bytes == expected.size(), context + ": wrong payload size");
+        const std::vector<uint64_t> saved_offsets = offsets;
+        expected.resize((size_t) (bytes + padding), 0);
+        expected.insert(expected.end(), original.begin() + (ptrdiff_t) (bytes + padding), original.end());
+
+        std::vector<uint8_t> arena = original;
+        err = "stale error";
+        const bool compacted = compact_cache_complement_in_place(arena.data(), arena.size(), experts,
+            layer_offsets, blob_sizes, offsets, bytes, padding, err);
+        require(compacted && err.empty(), context + ": " + err);
+        require(arena == expected, context + ": compact data, zeroed max-blob tail, or untouched suffix differs");
+        require(offsets == saved_offsets, context + ": compaction changed the plan");
+        for (size_t i = 0; i < offsets.size(); ++i)
+            require((offsets[i] == kNoCacheComplement) == ((mask & (1u << i)) == 0),
+                    context + ": wrong retained set");
+        if (mask == 29) {
+            // The last selected blob is only 3 bytes; a 5-byte fill also reads two zero padding bytes.
+            // Its ORIGINAL bytes overlap the eventual zeroed tail: clearing the tail before moving corrupts it.
+            require(offsets == std::vector<uint64_t>{0, kNoCacheComplement, 5, 10, 13, kNoCacheComplement},
+                    "after-load variable fixture has unexpected offsets");
+            const std::vector<uint8_t> full_slot(arena.begin() + 13, arena.begin() + 18);
+            require(full_slot == std::vector<uint8_t>{original[18], original[19], original[20], 0, 0},
+                    "after-load max-blob copy lost the short final expert or its padding");
+        }
+    }
+}
+
+void test_after_load_compaction_rejections() {
+    using namespace strata::core::detail;
+    const uint64_t absent = kNoCacheComplement, max = std::numeric_limits<uint64_t>::max();
+    const std::vector<uint64_t> layers{0, 15}, blobs{5, 3};
+    const std::vector<uint64_t> plan{0, absent, 5, 10, 13, absent};
+    std::vector<uint8_t> original(29);
+    for (size_t i = 0; i < original.size(); ++i) original[i] = (uint8_t) (i + 1);
+    auto reject = [&](const char* name, const std::vector<uint64_t>& source_layers,
+                      const std::vector<uint64_t>& source_blobs, const std::vector<uint64_t>& offsets,
+                      uint64_t bytes = 16, uint64_t padding = 5, int64_t experts = 3,
+                      uint64_t capacity = 29, bool null_base = false) {
+        std::vector<uint8_t> arena = original;
+        std::string err = "stale error";
+        const bool compacted = compact_cache_complement_in_place(null_base ? nullptr : arena.data(), capacity,
+            experts, source_layers, source_blobs, offsets, bytes, padding, err);
+        const std::string context = std::string("after-load rejection: ") + name;
+        require(!compacted, context + ": malformed plan accepted");
+        require(!err.empty() && err != "stale error", context + ": no fresh failure diagnostic");
+        require(arena == original, context + ": validation changed bytes before refusing the plan");
+    };
+    reject("null base", layers, blobs, plan, 16, 5, 3, 29, true);
+    reject("zero expert count", layers, blobs, plan, 16, 5, 0);
+    reject("negative expert count", layers, blobs, plan, 16, 5, -1);
+    reject("empty geometry", {}, {}, {}, 0, 0);
+    reject("layer vector mismatch", {0}, blobs, plan);
+    reject("short plan", layers, blobs, {0, absent, 5, 10, 13});
+    reject("long plan", layers, blobs, {0, absent, 5, 10, 13, absent, absent});
+    reject("late zero-size layer", layers, {5, 0}, plan);
+    reject("late overlapping layer", {0, 14}, blobs, plan);
+    reject("unordered source layers", {5, 0}, blobs, plan);
+    reject("late source beyond capacity", {0, 25}, blobs, plan);
+    reject("source offset overflow", {0, max}, blobs, plan);
+    reject("source span beyond supplied capacity", layers, blobs, plan, 16, 4, 3, 20);
+    reject("source multiplication overflow", {0}, {max}, {absent, absent}, 0, 0, 2);
+    reject("expert-index multiplication overflow", {0, 0, 0}, {1, 1, 1}, {}, 0, 0,
+           std::numeric_limits<int64_t>::max());
+    reject("payload exceeds capacity", layers, blobs, plan, 30, 0);
+    reject("padding exceeds capacity", layers, blobs, plan, 16, 14);
+    reject("padding addition overflow", layers, blobs, plan, 16, max);
+    reject("payload plus padding overflow", layers, blobs, plan, max - 1, 2, 3, max);
+    reject("short declared payload", layers, blobs, plan, 15);
+    reject("long declared payload", layers, blobs, plan, 17);
+    reject("reordered destinations", layers, blobs, {5, absent, 0, 10, 13, absent});
+    reject("overlapping destinations", layers, blobs, {0, absent, 0, 10, 13, absent});
+    reject("destination gap", layers, blobs, {0, absent, 6, 11, 14, absent});
+    reject("late malformed destination", layers, blobs, {0, absent, 5, 10, 14, absent});
+    reject("destination overflow", layers, blobs, {0, absent, 5, 10, max - 1, absent});
+    reject("all absent with nonzero total", layers, blobs,
+           {absent, absent, absent, absent, absent, absent}, 1);
+}
+
+void test_after_load_registered_slice_alias() {
+    using namespace strata::core::detail;
+    // Host arrays stand in for device aliases; this tests ADDRESS arithmetic, not CUDA.
+    uint8_t first[16]{}, second[16]{}, third[16]{};
+    const std::vector<RegisteredSlice> slices{{0, 12, first}, {12, 20, second},
+                                             {24, 32, third}, {32, 40, nullptr}};
+    require(registered_slice_alias(slices, 0, 12) == first, "after-load full first slice alias differs");
+    require(registered_slice_alias(slices, 3, 9) == first + 3, "after-load exact slice endpoint was refused");
+    require(registered_slice_alias(slices, 12, 8) == second, "after-load next slice start used the previous alias");
+    require(registered_slice_alias(slices, 19, 1) == second + 7, "after-load last registered byte was refused");
+    require(registered_slice_alias(slices, 24, 8) == third, "after-load alias after a gap differs");
+    require(registered_slice_alias(slices, 11, 2) == nullptr,
+            "after-load straddle of two different alias bases was accepted");
+    require(registered_slice_alias(slices, 19, 2) == nullptr, "after-load registered/pageable straddle was accepted");
+    require(registered_slice_alias(slices, 20, 1) == nullptr && registered_slice_alias(slices, 23, 1) == nullptr,
+            "after-load unregistered gap has an alias");
+    require(registered_slice_alias(slices, 24, 9) == nullptr, "after-load transfer exceeded its slice");
+    require(registered_slice_alias(slices, 32, 1) == nullptr && registered_slice_alias(slices, 39, 1) == nullptr,
+            "after-load unmapped registration has an alias");
+    require(registered_slice_alias(slices, 40, 1) == nullptr, "after-load address beyond the last slice was accepted");
+    require(registered_slice_alias(slices, 0, 0) == nullptr && registered_slice_alias(slices, 12, 0) == nullptr,
+            "after-load zero-byte transfer has an alias");
+    require(registered_slice_alias({}, 0, 1) == nullptr, "after-load empty registration list has an alias");
+    require(registered_slice_alias({{4, 9, first}}, 3, 1) == nullptr,
+            "after-load address before the first registration was accepted");
+    require(registered_slice_alias({{4, 4, first}}, 4, 1) == nullptr,
+            "after-load empty registration has an alias");
+    // An actual short expert can fit while fill_slot's default max-blob transfer cannot.
+    require(registered_slice_alias({{0, 7, first}}, 4, 3) == first + 4 &&
+                registered_slice_alias({{0, 7, first}}, 4, 5) == nullptr,
+            "after-load max-blob containment was mistaken for actual-blob containment");
+    const uint64_t max = std::numeric_limits<uint64_t>::max();
+    require(registered_slice_alias(slices, max, 1) == nullptr &&
+                registered_slice_alias(slices, 1, max) == nullptr,
+            "after-load transfer arithmetic overflow escaped its slice");
+    const std::vector<RegisteredSlice> high{{max - 4, max, first}};
+    require(registered_slice_alias(high, max - 3, 3) == first + 1,
+            "after-load bounded high-offset alias was refused");
+    require(registered_slice_alias(high, max - 3, 4) == nullptr &&
+                registered_slice_alias(high, max, 1) == nullptr,
+            "after-load high-offset endpoint wrap was accepted");
+}
+
 // #1250: when the page-locked complement is registered in steps, and what a meminfo reading says
 void test_pin_pacing() {
     using namespace strata::core::detail;
@@ -741,6 +891,13 @@ void test_rotating_source(bool rotate, bool pin) {
 
 int main(int argc, char** argv) {
     try {
+        test_after_load_compaction();
+        test_after_load_compaction_rejections();
+        test_after_load_registered_slice_alias();
+        if (argc == 2 && std::string(argv[1]) == "--after-load-pure") {
+            std::cout << "file_expert_source_test: after-load pure PASS\n";
+            return 0;
+        }
         test_complement_plan();
         test_resident_lend_region();
         test_split_lend_regions();
