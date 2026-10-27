@@ -1,0 +1,27 @@
+{
+  "tested_source_commit": "2f8c82bed82a77deb2b5f51ca348848e4fb2ea24",
+  "old_exe_sha256": "9860f56b4d8a997a591b578752594fb8cd9bf94372b4d9e4f586bff516f52ca6",
+  "new_exe_sha256": "1a26de782272867d3dbca1cbcca5b2991e4c444f63a7ed4c3848917001e3b4a6",
+  "input_sha256": {
+    "request.json": "1a292ab7252a0603dc9271b86b0e3aebdcc72cd720cae1a4aaef2739978726e1",
+    "continuous-request.json": "fc5c3b24cf0b606472c65a22f1ae59948f9b7940af3cfda1e89d413f85e37086",
+    "expected.json": "80afdaeb99dcd2aac0fdeb070d0c8d63be8e522791e32e538bd1a28a4912a7bd",
+    "initial-expert-profile.bin": "3f76c358ffc61688bd64585af55240c651b0dae6f72f404415ab669d27d4d0d4"
+  },
+  "initial_order": [
+    "old1",
+    "new1",
+    "new2",
+    "old2"
+  ],
+  "supplementary_order": [
+    "new3",
+    "old3",
+    "old4",
+    "new4"
+  ],
+  "graph_code_source_unchanged_during_test": true,
+  "same_effective_configuration_except_free_vram": true,
+  "formal_hashes_unchanged": true,
+  "note": "Model paths, raw prompt, full outputs, runtime launch files and profiler data are retained locally and are not published."
+}

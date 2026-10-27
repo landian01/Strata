@@ -1,8 +1,8 @@
 # Validation of the extracted scheduler source
 
-Date: 2026-10-28. This record describes the source extraction in this commit,
-not another decode benchmark. The earlier performance measurements are in
-[the scheduler notes](DUAL_GPU_MOE_SCHEDULER.md).
+Date: 2026-10-28. This record covers the source extraction, focused tests and
+subsequent full-model comparison. The earlier experimental performance
+measurements are in [the scheduler notes](DUAL_GPU_MOE_SCHEDULER.md).
 
 ## Build identity
 
@@ -34,6 +34,8 @@ not another decode benchmark. The earlier performance measurements are in
 | `cpu_expert_publish_test <compatible GGUF>` with ready DAG, per-expert publication, serial verification and changing-input checks enabled | PASS: 3,240 concurrent GPU-consumer checks, generation resets and guard rows; sampled bitwise serial checks passed |
 | `strata --help` from the fresh build | PASS |
 | Staged whitespace and content audit | PASS: no local absolute paths, credentials, model files, binaries or raw profiler captures |
+| Same-day full-model answer comparison against the selected experimental executable | PASS: eight natural completions; exact expected values and identical canonical JSON objects |
+| Same-day decode non-regression comparison | NOT_PASS: 20 measured requests per executable; original 98.560 token/s, extracted build 96.530 token/s, -2.06%; main merge withheld |
 
 The CPU publication test used real Swift IQ3_S expert weights from layers 3,
 20 and 47, group counts 1/4/8/16/32/80 and changing activations. It ran with
@@ -47,6 +49,28 @@ The precise-solver oracle was the retained pre-optimization diagnostic used in
 the original experiments. It is a local validation artifact, not a second
 production scheduler. The reusable regression tests are included in this commit.
 
+## Full-model comparison
+
+The tested source revision was `2f8c82bed82a77deb2b5f51ca348848e4fb2ea24`,
+using the fresh executable hash above. The selected original executable was
+`9860f56b4d8a997a591b578752594fb8cd9bf94372b4d9e4f586bff516f52ca6`.
+The two builds ran the same 8,202-input / 2,048-output protocol, initial expert
+profile, environment, effective cache capacities and sampler settings. Eight
+process reloads used old/new/new/old followed by new/old/old/new order; each
+reload excluded one warmup and retained five measured requests. Separate
+complete-answer checks all passed. Text formatting and reasoning traces varied;
+this is not a bitwise logit-parity claim.
+
+The first batch measured -3.51% and the supplementary batch -0.59%; the combined
+new-build difference was -2.06%. This does not establish no performance
+regression, and the main-branch merge gate did not pass. Cold-weight traffic and
+generation traces varied; the cause is not established. The formal service was
+restored after both batches, with protected file hashes unchanged.
+
+The [full report and all 56 request records](../bench/results/2026-10-28-dual-gpu-source-parity/README.md)
+include warmups, timing samples, complete-answer checks, variability and identity
+hashes. No engine code was changed during this acceptance comparison.
+
 ## Unverified scope
 
 - HIP, gfx906, SYCL and Metal builds/runtime: **NOT_RUN**. CUDA guards do not
@@ -55,9 +79,9 @@ production scheduler. The reusable regression tests are included in this commit.
   compatibility gate (`STL1002`, requiring CUDA 12.4 or newer). It did not reach
   runtime validation. CUDA 12.x compatibility is **NOT_VALIDATED**; no check was
   bypassed and no toolchain was installed or changed.
-- Full-model generation, default-path end-to-end bitwise parity, broad quality,
-  long-context acceptance and sustained decode benchmarks of this new executable:
-  **NOT_RUN**. The historical 102.74 token/s aggregate belongs to the explicitly
-  identified earlier executable, not this build.
+- Default-path end-to-end bitwise parity, broad quality, other models and
+  long-context acceptance: **NOT_RUN**. The bounded full-model comparison above
+  does not establish these. The historical 102.74 token/s aggregate belongs to
+  the explicitly identified earlier executable, not this build.
 - The formal service, its engine, launch files and expert profile were not
   replaced. This source commit is not a deployment or a binary release.

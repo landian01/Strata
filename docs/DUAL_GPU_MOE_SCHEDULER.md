@@ -138,6 +138,14 @@ diagnostic bookkeeping and supplies portable regression tests. Fresh build/test
 results for the extracted source are recorded in the [validation note](DUAL_GPU_MOE_VALIDATION.md);
 the earlier timings must not be relabeled as fresh measurements of that build.
 
+A subsequent same-day full-model comparison measured 98.56 token/s for the
+selected experimental executable and 96.53 token/s for source revision
+`2f8c82bed82a77deb2b5f51ca348848e4fb2ea24` (-2.06%, 20 timed requests each).
+Eight complete-answer checks passed with identical canonical JSON results, but
+the decode non-regression gate did not pass. The fork's main merge was withheld.
+See the [full comparison](../bench/results/2026-10-28-dual-gpu-source-parity/README.md)
+for all runs, the supplementary batch, variability and limits.
+
 Removed experiments include coupled MTP pipelining, all-GPU/pageable expert
 execution, chunked primary fetch, helper adaptation enqueue/static modes and
 the later device-ready wait bypass. No binary, model, machine-specific launch
