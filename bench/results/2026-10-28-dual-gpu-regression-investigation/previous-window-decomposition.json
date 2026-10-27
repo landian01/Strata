@@ -1,0 +1,20 @@
+{
+  "old": {
+    "windows": 8853,
+    "tokens": 40960,
+    "decode_ms": 415585.3,
+    "windows_per_token": 0.2161376953125,
+    "ms_per_window": 46.94287812041116
+  },
+  "new": {
+    "windows": 8992,
+    "tokens": 40960,
+    "decode_ms": 424325.8,
+    "windows_per_token": 0.21953125,
+    "ms_per_window": 47.18925711743772
+  },
+  "window_count_ratio": 1.0157008923528748,
+  "ms_per_window_ratio": 1.0052484851140695,
+  "decode_time_per_token_ratio": 1.021031783366736,
+  "interpretation": "Exact arithmetic decomposition of aggregate time, not causal isolation: window shapes, generated trajectory and cache state differ."
+}

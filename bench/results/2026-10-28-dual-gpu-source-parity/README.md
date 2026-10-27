@@ -3,6 +3,10 @@
 2026-10-28. Acceptance result: **NOT_PASS**. The tested source commit is
 `2f8c82bed82a77deb2b5f51ca348848e4fb2ea24`. No engine code was changed during this comparison.
 
+This initial rejected comparison is retained unchanged in scope and result.
+The subsequent [controlled investigation and predeclared confirmation](../2026-10-28-dual-gpu-regression-investigation/README.md)
+passed its stated merge gate; consult that report for the later decision and its limits.
+
 The selected experimental executable and the fresh source build ran on the same
 Windows PC: RTX 5080 + RTX 2070, i7-9700K, NVIDIA driver 610.88, CUDA 13.0,
 MSVC 14.44.35207, Release, CUDA architectures 75 and 120. Both used Swift IQ3_S
@@ -75,11 +79,14 @@ The new-build aggregate difference was **-2.06%**.
   it is not proof of zero regression or a broad release confidence guarantee.
 - Every new-build request above 100 token/s with CV below 5%:
   **NOT_PASS**.
-- Main-branch merge gate: **NOT_PASS**. The evidence does not establish no performance regression; main must remain unchanged.
+- Main-branch merge gate at this comparison: **NOT_PASS**. These results alone did not establish no performance regression, so the merge was withheld.
 
-Cold-weight traffic, generated reasoning, draft acceptance and graph preparation
-cost varied between requests. These are measured differences, not proof of the
-root cause. No speculative engine change was made to turn this acceptance test
+Cold-weight traffic, generated reasoning, draft acceptance and the reported host
+staging time varied between requests. Follow-up source inspection corrected the
+original interpretation of `stage`: it accumulates input staging and PLE gather
+work, can overlap or be included in other timer intervals, and is not a measure
+of graph preparation. These measurements do not establish the root cause.
+No speculative engine change was made to turn this acceptance test
 into a pass. Historical 102.74 token/s measurements must not replace this fresh
 same-day comparison. Broader quality, default-path full-model parity, other
 models, long-context limits and HIP/SYCL/Metal remain outside this test.

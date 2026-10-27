@@ -1,0 +1,279 @@
+{
+  "diagnostic_only": true,
+  "complete_window_hashes_identical": true,
+  "window_shapes_identical": true,
+  "runs": [
+    {
+      "arm": "old1",
+      "exit_code": 0,
+      "wall_s": 131.71899999998277,
+      "windows_sha256": "4871b4276cf0e5a66a01f91a84ddfa1ab84c97549bd37f80e7cab0476bd3515e",
+      "summary": [
+        "speculation              456 rounds of 8, drafts accepted 1593 of 1596 (0.998), 4.49 tokens per round",
+        "follow                   45 of 2048 emitted tokens differ from the argmax",
+        "window cost (ms/round)   T1:40.06(n=55) T2:64.90(n=56) T3:94.09(n=56) T4:111.01(n=56) T5:130.05(n=56) T6:151.94(n=56) T7:188.33(n=56) T8:198.68(n=56)",
+        "verify window            wait for rings 25.966  pool 93.986  host 0.348  commit 0.038 ms/round; CPU experts 10.47 distinct / 11.18 routed per layer"
+      ],
+      "window_count": 456,
+      "window_shape_sha256": "f87560aefb50d809cb361df5204fb298928d9ce3dc4672b3488ec194552b7f23",
+      "widths": {
+        "1": {
+          "ms": 40.06,
+          "n": 55
+        },
+        "2": {
+          "ms": 64.9,
+          "n": 56
+        },
+        "3": {
+          "ms": 94.09,
+          "n": 56
+        },
+        "4": {
+          "ms": 111.01,
+          "n": 56
+        },
+        "5": {
+          "ms": 130.05,
+          "n": 56
+        },
+        "6": {
+          "ms": 151.94,
+          "n": 56
+        },
+        "7": {
+          "ms": 188.33,
+          "n": 56
+        },
+        "8": {
+          "ms": 198.68,
+          "n": 56
+        }
+      },
+      "mean_window_ms_excluding_capture": 122.56666666666668,
+      "timing_eligible": false
+    },
+    {
+      "arm": "new1",
+      "exit_code": 0,
+      "wall_s": 124.67199999996228,
+      "windows_sha256": "4871b4276cf0e5a66a01f91a84ddfa1ab84c97549bd37f80e7cab0476bd3515e",
+      "summary": [
+        "speculation              456 rounds of 8, drafts accepted 1593 of 1596 (0.998), 4.49 tokens per round",
+        "follow                   45 of 2048 emitted tokens differ from the argmax",
+        "window cost (ms/round)   T1:36.02(n=55) T2:60.50(n=56) T3:84.31(n=56) T4:102.52(n=56) T5:117.51(n=56) T6:136.32(n=56) T7:162.79(n=56) T8:169.78(n=56)",
+        "verify window            wait for rings 26.366  pool 79.585  host 0.322  commit 0.034 ms/round; CPU experts 10.47 distinct / 11.18 routed per layer"
+      ],
+      "window_count": 456,
+      "window_shape_sha256": "f87560aefb50d809cb361df5204fb298928d9ce3dc4672b3488ec194552b7f23",
+      "widths": {
+        "1": {
+          "ms": 36.02,
+          "n": 55
+        },
+        "2": {
+          "ms": 60.5,
+          "n": 56
+        },
+        "3": {
+          "ms": 84.31,
+          "n": 56
+        },
+        "4": {
+          "ms": 102.52,
+          "n": 56
+        },
+        "5": {
+          "ms": 117.51,
+          "n": 56
+        },
+        "6": {
+          "ms": 136.32,
+          "n": 56
+        },
+        "7": {
+          "ms": 162.79,
+          "n": 56
+        },
+        "8": {
+          "ms": 169.78,
+          "n": 56
+        }
+      },
+      "mean_window_ms_excluding_capture": 108.88138702460851,
+      "timing_eligible": true
+    },
+    {
+      "arm": "new2",
+      "exit_code": 0,
+      "wall_s": 124.92200000002049,
+      "windows_sha256": "4871b4276cf0e5a66a01f91a84ddfa1ab84c97549bd37f80e7cab0476bd3515e",
+      "summary": [
+        "speculation              456 rounds of 8, drafts accepted 1593 of 1596 (0.998), 4.49 tokens per round",
+        "follow                   45 of 2048 emitted tokens differ from the argmax",
+        "window cost (ms/round)   T1:38.59(n=55) T2:64.83(n=56) T3:82.81(n=56) T4:102.36(n=56) T5:122.90(n=56) T6:140.90(n=56) T7:152.33(n=56) T8:165.85(n=56)",
+        "verify window            wait for rings 27.095  pool 79.090  host 0.223  commit 0.036 ms/round; CPU experts 10.47 distinct / 11.18 routed per layer"
+      ],
+      "window_count": 456,
+      "window_shape_sha256": "f87560aefb50d809cb361df5204fb298928d9ce3dc4672b3488ec194552b7f23",
+      "widths": {
+        "1": {
+          "ms": 38.59,
+          "n": 55
+        },
+        "2": {
+          "ms": 64.83,
+          "n": 56
+        },
+        "3": {
+          "ms": 82.81,
+          "n": 56
+        },
+        "4": {
+          "ms": 102.36,
+          "n": 56
+        },
+        "5": {
+          "ms": 122.9,
+          "n": 56
+        },
+        "6": {
+          "ms": 140.9,
+          "n": 56
+        },
+        "7": {
+          "ms": 152.33,
+          "n": 56
+        },
+        "8": {
+          "ms": 165.85,
+          "n": 56
+        }
+      },
+      "mean_window_ms_excluding_capture": 108.97836689038031,
+      "timing_eligible": true
+    },
+    {
+      "arm": "old2",
+      "exit_code": 0,
+      "wall_s": 128.5779999999795,
+      "windows_sha256": "4871b4276cf0e5a66a01f91a84ddfa1ab84c97549bd37f80e7cab0476bd3515e",
+      "summary": [
+        "speculation              456 rounds of 8, drafts accepted 1593 of 1596 (0.998), 4.49 tokens per round",
+        "follow                   45 of 2048 emitted tokens differ from the argmax",
+        "window cost (ms/round)   T1:39.13(n=55) T2:57.03(n=56) T3:87.05(n=56) T4:97.37(n=56) T5:124.13(n=56) T6:135.02(n=56) T7:149.89(n=56) T8:167.58(n=56)",
+        "verify window            wait for rings 26.523  pool 77.703  host 0.433  commit 0.033 ms/round; CPU experts 10.47 distinct / 11.18 routed per layer"
+      ],
+      "window_count": 456,
+      "window_shape_sha256": "f87560aefb50d809cb361df5204fb298928d9ce3dc4672b3488ec194552b7f23",
+      "widths": {
+        "1": {
+          "ms": 39.13,
+          "n": 55
+        },
+        "2": {
+          "ms": 57.03,
+          "n": 56
+        },
+        "3": {
+          "ms": 87.05,
+          "n": 56
+        },
+        "4": {
+          "ms": 97.37,
+          "n": 56
+        },
+        "5": {
+          "ms": 124.13,
+          "n": 56
+        },
+        "6": {
+          "ms": 135.02,
+          "n": 56
+        },
+        "7": {
+          "ms": 149.89,
+          "n": 56
+        },
+        "8": {
+          "ms": 167.58,
+          "n": 56
+        }
+      },
+      "mean_window_ms_excluding_capture": 107.30217002237137,
+      "timing_eligible": true
+    },
+    {
+      "arm": "old3",
+      "exit_code": 0,
+      "wall_s": 144.89100000000326,
+      "windows_sha256": "4871b4276cf0e5a66a01f91a84ddfa1ab84c97549bd37f80e7cab0476bd3515e",
+      "summary": [
+        "speculation              456 rounds of 8, drafts accepted 1593 of 1596 (0.998), 4.49 tokens per round",
+        "follow                   45 of 2048 emitted tokens differ from the argmax",
+        "window cost (ms/round)   T1:36.23(n=55) T2:59.34(n=56) T3:79.71(n=56) T4:102.97(n=56) T5:122.78(n=56) T6:136.40(n=56) T7:151.76(n=56) T8:165.62(n=56)",
+        "verify window            wait for rings 26.283  pool 77.995  host 0.318  commit 0.034 ms/round; CPU experts 10.47 distinct / 11.18 routed per layer"
+      ],
+      "window_count": 456,
+      "window_shape_sha256": "f87560aefb50d809cb361df5204fb298928d9ce3dc4672b3488ec194552b7f23",
+      "widths": {
+        "1": {
+          "ms": 36.23,
+          "n": 55
+        },
+        "2": {
+          "ms": 59.34,
+          "n": 56
+        },
+        "3": {
+          "ms": 79.71,
+          "n": 56
+        },
+        "4": {
+          "ms": 102.97,
+          "n": 56
+        },
+        "5": {
+          "ms": 122.78,
+          "n": 56
+        },
+        "6": {
+          "ms": 136.4,
+          "n": 56
+        },
+        "7": {
+          "ms": 151.76,
+          "n": 56
+        },
+        "8": {
+          "ms": 165.62,
+          "n": 56
+        }
+      },
+      "mean_window_ms_excluding_capture": 107.00923937360179,
+      "timing_eligible": true
+    }
+  ],
+  "timing_exclusion": {
+    "arm": "old1",
+    "status": "TIMING_EXCLUDED",
+    "reason": "cuobjdump machine-code extraction overlapped the first fixed-token replay; retain numerical evidence but do not use this arm for timing comparisons",
+    "replacement": "old3 after the planned ABBA sequence; all other arms retained"
+  },
+  "limits": "Oracle/follow CLI with static hot residency and no MTP; fixed 8151 prompt tokens and 2048 continuation tokens; not production throughput or broad quality acceptance.",
+  "mean_window_ms": {
+    "old": 107.15570469798658,
+    "new": 108.92987695749441
+  },
+  "relative_throughput": 0.9837127121680296,
+  "width_relative_throughput": {
+    "1": 1.0100522718134297,
+    "2": 0.928508736934493,
+    "3": 0.9978458592628051,
+    "4": 0.9778406872315503,
+    "5": 1.0270371448775009,
+    "6": 0.979077988601111,
+    "7": 0.9572543792840822,
+    "8": 0.9927598843965082
+  }
+}

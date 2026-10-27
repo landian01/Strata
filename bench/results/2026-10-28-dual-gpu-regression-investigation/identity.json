@@ -1,0 +1,76 @@
+{
+  "tested_source_commit": "2f8c82bed82a77deb2b5f51ca348848e4fb2ea24",
+  "binaries": {
+    "old": {
+      "strata.exe": "9860f56b4d8a997a591b578752594fb8cd9bf94372b4d9e4f586bff516f52ca6",
+      "strata_kq.dll": "7d17e35d3455a8688c770864f7337e3e0c69ca99aa88c34c5b9f7c40fccadbb3"
+    },
+    "new": {
+      "strata.exe": "1a26de782272867d3dbca1cbcca5b2991e4c444f63a7ed4c3848917001e3b4a6",
+      "strata_kq.dll": "e8e7881d36be24266842cd3594ba42041e506002945b14370017afc44a51fd2e"
+    }
+  },
+  "inputs": {
+    "request.json": "1a292ab7252a0603dc9271b86b0e3aebdcc72cd720cae1a4aaef2739978726e1",
+    "continuous-request.json": "fc5c3b24cf0b606472c65a22f1ae59948f9b7940af3cfda1e89d413f85e37086",
+    "expected.json": "80afdaeb99dcd2aac0fdeb070d0c8d63be8e522791e32e538bd1a28a4912a7bd",
+    "initial-expert-profile.bin": "3f76c358ffc61688bd64585af55240c651b0dae6f72f404415ab669d27d4d0d4"
+  },
+  "order": [
+    "old1:7",
+    "new1:7",
+    "new2:7",
+    "old2:7",
+    "new3:7",
+    "old3:7",
+    "old4:7",
+    "new4:7",
+    "old5:7",
+    "new5:7",
+    "new6:7",
+    "old6:7"
+  ],
+  "protocol": "Each fresh process: one excluded 2048-token warmup, five measured continuous 2048-token requests, then one natural full-answer gate. No KV reuse. ABBA reload order.",
+  "performance_gate": "One predeclared confirmatory batch: six reloads and 30 measured requests per binary. Aggregate new throughput must not be below old and paired reload-block bootstrap one-sided 95% lower ratio must be >=0.97. No optional sample extension to obtain a pass; report all prior exploratory evidence separately.",
+  "sample_stop": "Exactly 12 reloads, 60 measured requests, 12 excluded warmups and 12 complete quality answers; failed protocol is reported, not silently replaced.",
+  "effective_engine": {
+    "model": "swift-1.5-iq3_s",
+    "max_context": 262144,
+    "images": false,
+    "version": "0.1.50",
+    "logit_bias": 1,
+    "context": 262144,
+    "kv": "int8",
+    "kv_resident": 32768,
+    "expert_slots": 6988,
+    "expert_cache_mib": 13550,
+    "expert_slots_primary": 3788,
+    "expert_cache_primary_mib": 7345,
+    "spec": 8,
+    "mtp_max": 6,
+    "lookup": 3,
+    "cvec": 0,
+    "arena_mib": 47962,
+    "pool_workers": 5,
+    "pcie_frac": "0.50",
+    "spec_min_p": "0.50",
+    "conversation_cache_mib": 0,
+    "conversation_cache_slots": 0,
+    "conversation_cache_min_free_mib": 2560,
+    "conversation_cache_min_tokens": 0,
+    "tail_role_token": -1,
+    "vram_elastic": 0,
+    "prefill_cap": 8448,
+    "prefill_stages": 1,
+    "stream_all_min": 1024,
+    "prefill_pipe": 0,
+    "engine": "0.1.50",
+    "drafting": "mtp",
+    "drafting_note": ""
+  },
+  "effective_engine_equal_except_free_vram": true,
+  "source_code_changed_during_investigation": false,
+  "formal_protected_hashes_unchanged": true,
+  "prior_exploratory_report": "../2026-10-28-dual-gpu-source-parity/README.md",
+  "raw_evidence_retained_locally": true
+}

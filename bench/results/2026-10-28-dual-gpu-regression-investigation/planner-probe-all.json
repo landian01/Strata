@@ -1,0 +1,1887 @@
+{
+  "samples": [
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 1,
+      "us": 10.3955
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 1,
+      "us": 10.411
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 1,
+      "us": 11.6395
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 1,
+      "us": 10.365
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 1,
+      "us": 10.438125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 1,
+      "us": 10.418875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 1,
+      "us": 10.382751
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 1,
+      "us": 10.433375
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 2,
+      "us": 18.873251
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 2,
+      "us": 22.031626
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 2,
+      "us": 17.60025
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 2,
+      "us": 17.558376
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 2,
+      "us": 19.932125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 2,
+      "us": 17.562876
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 2,
+      "us": 17.553625
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 2,
+      "us": 17.537125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 3,
+      "us": 30.129
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 3,
+      "us": 29.523624
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 3,
+      "us": 29.470001
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 3,
+      "us": 31.000875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 3,
+      "us": 29.43075
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 3,
+      "us": 29.547125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 3,
+      "us": 29.557875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 3,
+      "us": 31.070124
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 4,
+      "us": 34.425251
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 4,
+      "us": 33.045124
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 4,
+      "us": 34.887875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 4,
+      "us": 32.945248
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 4,
+      "us": 75.90213
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 4,
+      "us": 32.949123
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 4,
+      "us": 34.23975
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 4,
+      "us": 32.868374
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 5,
+      "us": 43.953499
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 5,
+      "us": 45.506874
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 5,
+      "us": 45.487751
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 5,
+      "us": 43.24025
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 5,
+      "us": 44.673748
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 5,
+      "us": 45.354752
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 5,
+      "us": 43.417751
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 5,
+      "us": 44.084373
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 6,
+      "us": 41.3405
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 6,
+      "us": 40.813751
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 6,
+      "us": 80.441994
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 6,
+      "us": 40.566875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 6,
+      "us": 40.670128
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 6,
+      "us": 41.5345
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 6,
+      "us": 40.163376
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 6,
+      "us": 40.002377
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 7,
+      "us": 47.802876
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 7,
+      "us": 47.892002
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 7,
+      "us": 49.141628
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 7,
+      "us": 48.952499
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 7,
+      "us": 47.71875
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 7,
+      "us": 47.9505
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 7,
+      "us": 48.675125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 7,
+      "us": 48.506001
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 8,
+      "us": 64.768372
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 8,
+      "us": 65.247627
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 8,
+      "us": 62.606625
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 8,
+      "us": 63.650249
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 8,
+      "us": 62.272625
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 8,
+      "us": 64.023003
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 8,
+      "us": 62.598125
+    },
+    {
+      "file": "planner-probe.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 8,
+      "us": 63.55975
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 1,
+      "us": 10.368625
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 1,
+      "us": 10.411124
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 1,
+      "us": 10.4025
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 1,
+      "us": 10.399751
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 1,
+      "us": 10.399876
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 1,
+      "us": 10.503375
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 1,
+      "us": 10.4165
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 1,
+      "us": 11.051375
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 2,
+      "us": 18.863249
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 2,
+      "us": 18.38975
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 2,
+      "us": 17.680624
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 2,
+      "us": 19.578749
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 2,
+      "us": 17.645124
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 2,
+      "us": 17.7365
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 2,
+      "us": 18.424126
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 2,
+      "us": 18.242626
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 3,
+      "us": 29.571001
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 3,
+      "us": 29.630751
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 3,
+      "us": 29.522625
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 3,
+      "us": 30.727625
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 3,
+      "us": 29.384499
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 3,
+      "us": 30.766624
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 3,
+      "us": 30.205374
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 3,
+      "us": 30.156
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 4,
+      "us": 32.874626
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 4,
+      "us": 33.655499
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 4,
+      "us": 33.70475
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 4,
+      "us": 32.926498
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 4,
+      "us": 32.910122
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 4,
+      "us": 34.3825
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 4,
+      "us": 32.963627
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 4,
+      "us": 35.023998
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 5,
+      "us": 45.489376
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 5,
+      "us": 45.127251
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 5,
+      "us": 43.631626
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 5,
+      "us": 44.26025
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 5,
+      "us": 45.484753
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 5,
+      "us": 43.683998
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 5,
+      "us": 76.498749
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 5,
+      "us": 45.303375
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 6,
+      "us": 39.372124
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 6,
+      "us": 39.5285
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 6,
+      "us": 40.157249
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 6,
+      "us": 39.985001
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 6,
+      "us": 39.3195
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 6,
+      "us": 39.490875
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 6,
+      "us": 40.883251
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 6,
+      "us": 39.559128
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 7,
+      "us": 47.016872
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 7,
+      "us": 47.905502
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 7,
+      "us": 47.887878
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 7,
+      "us": 47.75375
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 7,
+      "us": 48.786747
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 7,
+      "us": 48.039627
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 7,
+      "us": 47.110874
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 7,
+      "us": 48.255123
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 8,
+      "us": 66.967247
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 8,
+      "us": 66.148125
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 8,
+      "us": 64.543503
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 8,
+      "us": 62.896877
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 8,
+      "us": 63.519127
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 8,
+      "us": 63.921505
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 8,
+      "us": 63.296497
+    },
+    {
+      "file": "planner-probe-2.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 8,
+      "us": 64.18187
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 1,
+      "us": 10.399751
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 1,
+      "us": 10.41275
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 1,
+      "us": 10.414
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 1,
+      "us": 10.408376
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 1,
+      "us": 10.401626
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 1,
+      "us": 10.400125
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 1,
+      "us": 10.406626
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 1,
+      "us": 10.46175
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 2,
+      "us": 17.577499
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 2,
+      "us": 17.697001
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 2,
+      "us": 17.671751
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 2,
+      "us": 17.599249
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 2,
+      "us": 17.64875
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 2,
+      "us": 19.001625
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 2,
+      "us": 17.662374
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 2,
+      "us": 17.615875
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 3,
+      "us": 31.41275
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 3,
+      "us": 29.59375
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 3,
+      "us": 29.56325
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 3,
+      "us": 29.420376
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 3,
+      "us": 30.660374
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 3,
+      "us": 29.942375
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 3,
+      "us": 30.248251
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 3,
+      "us": 29.38475
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 4,
+      "us": 32.935001
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 4,
+      "us": 33.068501
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 4,
+      "us": 33.005249
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 4,
+      "us": 34.876625
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 4,
+      "us": 32.931248
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 4,
+      "us": 33.050625
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 4,
+      "us": 34.337376
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 4,
+      "us": 32.972
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 5,
+      "us": 45.265499
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 5,
+      "us": 43.507248
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 5,
+      "us": 44.752502
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 5,
+      "us": 44.616127
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 5,
+      "us": 43.2925
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 5,
+      "us": 44.872749
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 5,
+      "us": 43.517002
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 5,
+      "us": 43.334
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 6,
+      "us": 39.298252
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 6,
+      "us": 41.431374
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 6,
+      "us": 39.477123
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 6,
+      "us": 39.383251
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 6,
+      "us": 41.2565
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 6,
+      "us": 39.471874
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 6,
+      "us": 39.456753
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 6,
+      "us": 40.00425
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 7,
+      "us": 49.154873
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 7,
+      "us": 47.160126
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 7,
+      "us": 47.11525
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 7,
+      "us": 48.869503
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 7,
+      "us": 46.894375
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 7,
+      "us": 47.890377
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 7,
+      "us": 47.075748
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 7,
+      "us": 46.930378
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 8,
+      "us": 63.602871
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 8,
+      "us": 62.599003
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 8,
+      "us": 64.614494
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 8,
+      "us": 62.258125
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 8,
+      "us": 63.540249
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 8,
+      "us": 63.989998
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 8,
+      "us": 64.635872
+    },
+    {
+      "file": "planner-probe-3.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 8,
+      "us": 62.268375
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 1,
+      "us": 10.408125
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 1,
+      "us": 10.411876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 1,
+      "us": 10.392375
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 1,
+      "us": 10.392
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 1,
+      "us": 10.460999
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 1,
+      "us": 11.639
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 1,
+      "us": 10.37525
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 1,
+      "us": 10.401875
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 2,
+      "us": 17.62475
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 2,
+      "us": 17.6495
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 2,
+      "us": 17.640375
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 2,
+      "us": 19.49725
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 2,
+      "us": 17.621
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 2,
+      "us": 17.629875
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 2,
+      "us": 17.687876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 2,
+      "us": 17.622124
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 3,
+      "us": 29.49575
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 3,
+      "us": 29.518499
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 3,
+      "us": 29.487001
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 3,
+      "us": 30.693375
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 3,
+      "us": 29.391876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 3,
+      "us": 29.566875
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 3,
+      "us": 77.789497
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 3,
+      "us": 29.456375
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 4,
+      "us": 34.293251
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 4,
+      "us": 33.056
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 4,
+      "us": 33.719624
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 4,
+      "us": 32.919628
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 4,
+      "us": 33.608749
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 4,
+      "us": 33.687126
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 4,
+      "us": 33.055626
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 4,
+      "us": 33.045372
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 5,
+      "us": 43.916752
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 5,
+      "us": 44.261002
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 5,
+      "us": 43.573128
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 5,
+      "us": 44.555878
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 5,
+      "us": 43.239876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 5,
+      "us": 43.537872
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 5,
+      "us": 44.835251
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 5,
+      "us": 43.333
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 6,
+      "us": 39.379501
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 6,
+      "us": 39.650749
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 6,
+      "us": 40.323875
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 6,
+      "us": 39.952248
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 6,
+      "us": 39.440125
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 6,
+      "us": 39.470123
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 6,
+      "us": 41.502247
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 6,
+      "us": 39.280373
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 7,
+      "us": 46.888878
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 7,
+      "us": 49.108124
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 7,
+      "us": 47.134876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 7,
+      "us": 46.914875
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 7,
+      "us": 48.811249
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 7,
+      "us": 47.148624
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 7,
+      "us": 47.121498
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 7,
+      "us": 48.822998
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 0,
+      "T": 8,
+      "us": 62.244751
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 1,
+      "T": 8,
+      "us": 63.959373
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 2,
+      "T": 8,
+      "us": 63.309498
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 3,
+      "T": 8,
+      "us": 64.273994
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 4,
+      "T": 8,
+      "us": 62.342876
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 5,
+      "T": 8,
+      "us": 64.617996
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "new",
+      "rep": 6,
+      "T": 8,
+      "us": 84.129494
+    },
+    {
+      "file": "planner-probe-4.log",
+      "arm": "old",
+      "rep": 7,
+      "T": 8,
+      "us": 64.172256
+    }
+  ],
+  "widths": {
+    "1": {
+      "old": {
+        "median_us": 10.4017505,
+        "mean_us": 10.4491330625
+      },
+      "new": {
+        "median_us": 10.4115,
+        "mean_us": 10.5648516875
+      },
+      "median_delta_pct": 0.09372941602472373
+    },
+    "2": {
+      "old": {
+        "median_us": 17.634937,
+        "mean_us": 18.189820125
+      },
+      "new": {
+        "median_us": 17.6761875,
+        "mean_us": 18.101234625
+      },
+      "median_delta_pct": 0.2339135093025968
+    },
+    "3": {
+      "old": {
+        "median_us": 29.8500005,
+        "mean_us": 30.08659375
+      },
+      "new": {
+        "median_us": 29.5650625,
+        "mean_us": 32.7458435625
+      },
+      "median_delta_pct": -0.9545661481647261
+    },
+    "4": {
+      "old": {
+        "median_us": 32.958624,
+        "mean_us": 36.0911325625
+      },
+      "new": {
+        "median_us": 33.361999999999995,
+        "mean_us": 33.5505234375
+      },
+      "median_delta_pct": 1.2238860457280953
+    },
+    "5": {
+      "old": {
+        "median_us": 44.1723115,
+        "mean_us": 44.2527035
+      },
+      "new": {
+        "median_us": 44.506752,
+        "mean_us": 46.347844125
+      },
+      "median_delta_pct": 0.7571270070392488
+    },
+    "6": {
+      "old": {
+        "median_us": 39.755688,
+        "mean_us": 39.9256333125
+      },
+      "new": {
+        "median_us": 40.1603125,
+        "mean_us": 42.737350875
+      },
+      "median_delta_pct": 1.0177776322221055
+    },
+    "7": {
+      "old": {
+        "median_us": 48.0289995,
+        "mean_us": 48.0049841875
+      },
+      "new": {
+        "median_us": 47.8891275,
+        "mean_us": 47.7723599375
+      },
+      "median_delta_pct": -0.2912240551669165
+    },
+    "8": {
+      "old": {
+        "median_us": 63.5499995,
+        "mean_us": 63.532475875
+      },
+      "new": {
+        "median_us": 64.0065005,
+        "mean_us": 65.265046125
+      },
+      "median_delta_pct": 0.7183336012457353
+    }
+  },
+  "all_4_invocations_pass": true
+}

@@ -146,6 +146,17 @@ the decode non-regression gate did not pass. The fork's main merge was withheld.
 See the [full comparison](../bench/results/2026-10-28-dual-gpu-source-parity/README.md)
 for all runs, the supplementary batch, variability and limits.
 
+A later predeclared confirmation, with no production source changes, measured
+97.413 token/s for the original and 98.472 token/s for the submitted build
+(+1.09%, 30 timed requests each across six reloads per binary). All 12 separate
+complete-answer checks passed. Its paired reload-bootstrap one-sided 95% lower
+speed ratio was 0.9789, passing the previously stated 0.97 margin and the
+nonnegative aggregate-change gate. The initial slowdown did not reproduce
+consistently; this does not prove exact equality or stable 100 token/s.
+The [investigation report](../bench/results/2026-10-28-dual-gpu-regression-investigation/README.md)
+includes fixed-token numerical checks, NVIDIA machine-code comparisons, CPU
+code/layout checks, all confirmation samples, and retained negative evidence.
+
 Removed experiments include coupled MTP pipelining, all-GPU/pageable expert
 execution, chunked primary fetch, helper adaptation enqueue/static modes and
 the later device-ready wait bypass. No binary, model, machine-specific launch

@@ -1,0 +1,104 @@
+[
+  {
+    "object": "expert.cpp.obj",
+    "sections": 84,
+    "identical_code_sections": true,
+    "old_mtime": 1792991788.016614
+  },
+  {
+    "object": "expert_layout.cpp.obj",
+    "sections": 1038,
+    "identical_code_sections": true,
+    "old_mtime": 1792991794.0852966
+  },
+  {
+    "object": "hadamard.cpp.obj",
+    "sections": 870,
+    "identical_code_sections": true,
+    "old_mtime": 1792991796.6796162
+  },
+  {
+    "object": "iq_avx1.cpp.obj",
+    "sections": 97,
+    "identical_code_sections": true,
+    "old_mtime": 1792991808.0323539
+  },
+  {
+    "object": "iq_avx2.cpp.obj",
+    "sections": 1332,
+    "identical_code_sections": true,
+    "old_mtime": 1792994188.8907514
+  },
+  {
+    "object": "iq_avx512.cpp.obj",
+    "sections": 387,
+    "identical_code_sections": true,
+    "old_mtime": 1792991799.999372
+  },
+  {
+    "object": "kq_avx1.cpp.obj",
+    "sections": 3,
+    "identical_code_sections": true,
+    "old_mtime": 1792991806.3371334
+  },
+  {
+    "object": "kq_avx2.cpp.obj",
+    "sections": 25,
+    "identical_code_sections": true,
+    "old_mtime": 1792991806.1833212
+  },
+  {
+    "object": "native_expert.cpp.obj",
+    "sections": 631,
+    "identical_code_sections": true,
+    "old_mtime": 1792991797.9699645
+  },
+  {
+    "object": "nvfp4_avx2.cpp.obj",
+    "sections": 40,
+    "identical_code_sections": true,
+    "old_mtime": 1792991808.8717513
+  },
+  {
+    "object": "nvfp4_avx512.cpp.obj",
+    "sections": 37,
+    "identical_code_sections": true,
+    "old_mtime": 1792991808.394953
+  },
+  {
+    "object": "pool.cpp.obj",
+    "sections": 2088,
+    "identical_code_sections": true,
+    "old_mtime": 1793094438.8291323
+  },
+  {
+    "object": "q2_avx1.cpp.obj",
+    "sections": 26,
+    "identical_code_sections": true,
+    "old_mtime": 1792991807.0592918
+  },
+  {
+    "object": "q2_avx2.cpp.obj",
+    "sections": 40,
+    "identical_code_sections": true,
+    "old_mtime": 1792991794.8619082
+  },
+  {
+    "object": "tq_avx2.cpp.obj",
+    "sections": 20,
+    "identical_code_sections": true,
+    "old_mtime": 1792991810.1099901
+  },
+  {
+    "object": "tq_avx512.cpp.obj",
+    "sections": 26,
+    "identical_code_sections": true,
+    "old_mtime": 1792991810.432925
+  },
+  {
+    "object": "tq_cpu.cpp.obj",
+    "sections": 175,
+    "identical_code_sections": true,
+    "old_mtime": 1792991809.8545158
+  }
+]

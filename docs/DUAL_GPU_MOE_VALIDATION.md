@@ -35,7 +35,9 @@ measurements are in [the scheduler notes](DUAL_GPU_MOE_SCHEDULER.md).
 | `strata --help` from the fresh build | PASS |
 | Staged whitespace and content audit | PASS: no local absolute paths, credentials, model files, binaries or raw profiler captures |
 | Same-day full-model answer comparison against the selected experimental executable | PASS: eight natural completions; exact expected values and identical canonical JSON objects |
-| Same-day decode non-regression comparison | NOT_PASS: 20 measured requests per executable; original 98.560 token/s, extracted build 96.530 token/s, -2.06%; main merge withheld |
+| Initial same-day decode comparison | NOT_PASS: 20 measured requests per executable; original 98.560 token/s, extracted build 96.530 token/s, -2.06%; merge was withheld |
+| Subsequent predeclared full-model confirmation | PASS at the stated margin: 30 measured requests per executable; original 97.413 token/s, extracted build 98.472 token/s, +1.09%; paired reload-bootstrap one-sided 95% lower ratio 0.9789 versus required 0.97 |
+| Subsequent complete-answer checks | PASS: 12/12 natural completions; the same exact canonical JSON as the initial comparison |
 
 The CPU publication test used real Swift IQ3_S expert weights from layers 3,
 20 and 47, group counts 1/4/8/16/32/80 and changing activations. It ran with
@@ -70,6 +72,27 @@ restored after both batches, with protected file hashes unchanged.
 The [full report and all 56 request records](../bench/results/2026-10-28-dual-gpu-source-parity/README.md)
 include warmups, timing samples, complete-answer checks, variability and identity
 hashes. No engine code was changed during this acceptance comparison.
+
+## Follow-up investigation and acceptance
+
+The [follow-up investigation](../bench/results/2026-10-28-dual-gpu-regression-investigation/README.md)
+retains both negative timing observations and the complete confirmation data.
+Five fixed-token runs had identical residual hashes and argmax records for all
+456 windows. On each GPU architecture, 21 of 22 selected profiled kernel variants
+had identical machine words; the changed planner produced identical task tables
+and finish-time estimates in 2,048 randomized cases. CPU expert object code and
+the checked linked math-function alignments matched. No production source change
+was made in this investigation.
+
+The predeclared confirmation used six process reloads and 30 timing samples per
+binary, plus 12 excluded warmups and 12 separate complete-answer checks. It
+passed the unchanged throughput/margin gate after the original slowdown failed
+to reproduce consistently. This is a bounded non-regression decision, not proof
+of exactly zero performance difference. The full bootstrap interval, fixed-token
+-1.63% diagnostic, earlier -2.06% result, and an invalid telemetry-harness attempt
+are all disclosed. The formal service, protected hashes and tracked CPU affinities
+were restored. The new-build range was 87.606–112.329 token/s: stable 100 token/s
+on every request is **NOT_PASS**.
 
 ## Unverified scope
 

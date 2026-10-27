@@ -1,0 +1,7 @@
+{
+  "status": "INVALID_HARNESS",
+  "reason": "The added telemetry process was accidentally started after every request instead of once around the batch. Multiple nvidia-smi processes competed and truncated/reused the same log, invalidating fair timing conditions.",
+  "action": "Stop the owned test runtime, restore the formal service, retain every completed and interrupted record, and repeat the identical predeclared protocol in a new evidence directory after correcting and validating telemetry lifecycle.",
+  "release_evidence": false,
+  "selection": "Entire batch rejected for an independently observed harness defect, regardless of speeds or variant; no favorable samples retained for acceptance."
+}
