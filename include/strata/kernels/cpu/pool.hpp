@@ -61,6 +61,10 @@ struct ExpertJobMulti {
     int nt = 0;
     const ActQ* act[MAXT] = {};
     float* out[MAXT] = {};
+    // Optional mapped completion flags; last down partition publishes this
+    // expert's rows. Targets and input remain alive until the whole batch joins.
+    uint32_t* row_ready[MAXT] = {};
+    uint32_t ready_sequence = 0;
     /// Plan v0.3 P6: a native pack's activations (the layer's `vec_dot_type`), one per token.
     const void* nact[MAXT] = {};
     /// 149-cold: this job's own layout (null: the layer's) - the GGUF read in place, where gate / up / down are three
@@ -180,6 +184,7 @@ struct NumaSplitPlan {
 /// pool exists or the split is off.
 const NumaSplitPlan& active_numa_split();
 
+struct PoolTailTrace;
 class ExpertPool {
 public:
     /// `n_workers <= 0` means "every physical core except the first".  Workers are pinned to physical cores
@@ -207,6 +212,9 @@ public:
     ExpertPool& operator=(const ExpertPool&) = delete;
 
     int workers() const { return n_; }
+    // Diagnostic only: sampled layer/task timing, disabled without STRATA_TAIL_TRACE.
+    bool tail_begin(int64_t layer, int64_t nt);
+    void tail_mark(const char* stage, int64_t a = 0, int64_t b = 0);
     /// What bounded the default worker count (pool_plan.hpp; "" when a count was configured), the physical cores
     /// and logical processors counted - for the start-up line.
     const char* plan_limit() const { return plan_limit_; }
@@ -247,7 +255,11 @@ public:
     /// read once for all of its tokens.
     void run_split_multi(ExpertJobMulti* jobs, int n);
     /// Plan v0.3 P6: the same for a native pack's layer (ggml-cpu arithmetic, `nact` activations).
-    void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n);
+    // Optional host work, exactly once after publishing the first gate/up batch,
+    // before the host joins its drain. It must not throw or touch pool/job state.
+    using PublishedWork = void (*)(void*);
+    void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n,
+                                PublishedWork published_work = nullptr, void* work_ctx = nullptr);
     static constexpr int kMaxSplitMulti = 96;
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
@@ -284,11 +296,37 @@ public:
     static constexpr std::chrono::seconds kStall{60};
 
 private:
+    PoolTailTrace* tail_trace_ = nullptr;
     int phase_tasks(int64_t rows) const;
+    void run_native_dag(const NativeFmt& f, ExpertJobMulti* jobs, int n,
+                        PublishedWork published_work, void* work_ctx);
+    void drain_native_dag(int worker);
+    void drain_native_ready();
+    void publish_native_expert(int expert);
+    void native_dag_rows(int expert, bool down, int r0, int r1);
+    struct DagTask { int expert, r0, r1; };
+    struct alignas(64) DagExpert {
+        std::atomic<int> gu_left{0}, down_next{0}, down_left{0}, stage{0};
+        int down_parts = 0;
+    };
+    std::unique_ptr<DagExpert[]> dag_experts_;
+    std::vector<DagTask> dag_gu_;
+    alignas(64) std::atomic<int> dag_next_{0};
+    alignas(64) std::atomic<int> dag_done_{0};
+    alignas(64) std::atomic<int> dag_gu_left_{0};
+    std::atomic<uint64_t> dag_overlap_{0};
+    int dag_count_ = 0;
+    uint64_t dag_calls_ = 0, dag_checks_ = 0;
+    bool dag_measure_ = false;
+    bool dag_ready_ = false, dag_publish_ = false;
+    struct alignas(64) ReadyWord { std::atomic<uint64_t> bits{0}; };
+    ReadyWord dag_ready_words_[2];
+    alignas(64) std::atomic<int> dag_gu_producers_{0};
+    std::atomic<uint64_t> dag_published_{0}, dag_early_{0}, dag_empty_exits_{0};
     int tasks_ = 0;
     void worker(int id);
     void drain(int id, ExpertScratch& scratch, uint32_t epoch);
-    void run_phase(int mode, int n_tasks);
+    void run_phase(int mode, int n_tasks, PublishedWork published_work = nullptr, void* work_ctx = nullptr);
     /// Claim the next job of batch `epoch`, or -1 (that batch is exhausted, or it is not the current one).
     int claim(uint32_t epoch);
     /// Publish the batch whose description the caller has just written: reset `done`, then `head`, then the epoch.

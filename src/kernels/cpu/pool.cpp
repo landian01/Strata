@@ -1,5 +1,6 @@
 // src/kernels/cpu/pool.cpp - P2.S3: the CPU expert pool.  Read pool.hpp first; it explains the protocol.
 #include "strata/kernels/cpu/pool.hpp"
+#include <bit>
 #include "strata/core/progress.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -20,10 +21,15 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#if __has_include(<nvtx3/nvToolsExt.h>)
+#include <nvtx3/nvToolsExt.h>
+#define STRATA_HAS_TAIL_NVTX 1
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h>
 #include "pool_affinity_win.hpp"
 #else
 #include <pthread.h>
@@ -33,6 +39,99 @@
 #endif
 
 namespace strata::kernels::cpu {
+
+// No per-task locks or shared counter writes: a claimed task owns one cache-line
+// aligned record. The host reads it only after every worker has parked.
+struct PoolTailTrace {
+    struct alignas(64) Task {
+        int64_t start = 0, end = 0;
+        uint64_t cycles0 = 0, cycles1 = 0, bytes = 0;
+        int rows = 0, token_rows = 0, worker = -99, cpu = -1, nt_max = 0;
+    };
+    std::FILE *layers = nullptr, *phases = nullptr, *tasks_file = nullptr;
+    std::vector<Task> tasks;
+    uint64_t seq = 0, phase = 0;
+    int64_t layer = 0, nt = 0;
+    int stride = 97, skip = 4096;
+    bool selected = false, recording = false, track_cycles = true;
+    explicit PoolTailTrace(const char* prefix) : tasks(ExpertPool::kMaxTasks) {
+        const std::string p(prefix);
+        layers = std::fopen((p + ".layers.csv").c_str(), "w");
+        phases = std::fopen((p + ".phases.csv").c_str(), "w");
+        tasks_file = std::fopen((p + ".tasks.csv").c_str(), "w");
+        if (!layers || !phases || !tasks_file) {
+            for (auto* f : {layers, phases, tasks_file}) if (f) std::fclose(f);
+            throw std::runtime_error("cannot open tail trace files");
+        }
+        for (auto* f : {layers, phases, tasks_file}) std::setvbuf(f, nullptr, _IOFBF, 1 << 20);
+        if (const char* v = std::getenv("STRATA_TAIL_STRIDE")) stride = (std::max)(1, std::atoi(v));
+        if (const char* v = std::getenv("STRATA_TAIL_SKIP")) skip = (std::max)(0, std::atoi(v));
+        if (const char* v = std::getenv("STRATA_TAIL_CYCLES")) track_cycles = std::atoi(v) != 0;
+        std::fprintf(layers, "seq,layer,nt,stage,ns,a,b\n");
+        std::fprintf(phases, "seq,phase,layer,nt,mode,tasks,start,publish0,publish1,host_done,done,parked,faults0,faults1\n");
+        std::fprintf(tasks_file, "seq,phase,task,worker,cpu,start,end,cycles0,cycles1,rows,token_rows,weight_bytes,nt_max\n");
+        std::fprintf(stderr, "strata tail trace: every %d layers after %d calls; native non-NUMA phases only\n", stride, skip);
+    }
+    ~PoolTailTrace() {
+        for (auto* f : {layers, phases, tasks_file}) if (f) std::fclose(f);
+    }
+    static int64_t now() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static uint64_t cycles() {
+#if defined(_WIN32)
+        ULONG64 v = 0;
+        return QueryThreadCycleTime(GetCurrentThread(), &v) ? (uint64_t) v : 0;
+#else
+        return 0;
+#endif
+    }
+    static int64_t faults() {
+#if defined(_WIN32)
+        using Fn = BOOL (WINAPI*)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+        static const auto fn = (Fn) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+        PROCESS_MEMORY_COUNTERS info{};
+        info.cb = sizeof(info);
+        return fn && fn(GetCurrentProcess(), &info, sizeof(info)) ? (int64_t) info.PageFaultCount : -1;
+#else
+        return -1;
+#endif
+    }
+};
+
+bool ExpertPool::tail_begin(int64_t layer, int64_t nt) {
+    static const char* path = std::getenv("STRATA_TAIL_TRACE");
+    if (!path || !path[0]) return false;
+    if (!tail_trace_) tail_trace_ = new PoolTailTrace(path);
+    auto& tr = *tail_trace_;
+    ++tr.seq; tr.layer = layer; tr.nt = nt;
+    tr.selected = tr.seq >= (uint64_t) tr.skip && tr.seq % tr.stride == 0;
+    tail_mark("start");
+    return tr.selected;
+}
+
+void ExpertPool::tail_mark(const char* stage, int64_t a, int64_t b) {
+    if (!tail_trace_ || !tail_trace_->selected) return;
+    const int64_t ns = PoolTailTrace::now();
+    auto& tr = *tail_trace_;
+#if defined(STRATA_HAS_TAIL_NVTX)
+    static const bool nvtx = [] { const char* v=std::getenv("STRATA_TAIL_NVTX"); return v && std::atoi(v)!=0; }();
+    if (nvtx) {
+        char label[128];
+        std::snprintf(label,sizeof(label),"cpu:%llu:%s:%lld:%lld:%lld",(unsigned long long)tr.seq,stage,
+                      (long long)tr.layer,(long long)a,(long long)b);
+        nvtxEventAttributes_t event{};
+        event.version=NVTX_VERSION; event.size=NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        event.messageType=NVTX_MESSAGE_TYPE_ASCII; event.message.ascii=label;
+        event.payloadType=NVTX_PAYLOAD_TYPE_INT64; event.payload.llValue=ns;
+        nvtxMarkEx(&event);
+    }
+#endif
+    std::fprintf(tr.layers, "%llu,%lld,%lld,%s,%lld,%lld,%lld\n",
+                 (unsigned long long) tr.seq, (long long) tr.layer, (long long) tr.nt,
+                 stage, (long long) ns, (long long) a, (long long) b);
+}
 
 namespace {
 // STRATA_POOL_UMWAIT=<TSC cycles> (experimental, x86 WAITPKG only): a parked worker waits with UMONITOR/UMWAIT on the
@@ -956,6 +1055,7 @@ ExpertPool::~ExpertPool() {
     // Bump the epoch so a PARKED worker notices the stop flag rather than sleeping through it.
     publish();
     for (auto& t : threads_) t.join();
+    delete tail_trace_;
 }
 
 void ExpertPool::publish() {
@@ -1183,6 +1283,15 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
         if (!sliced) ci = claim(epoch);
         if (ci < 0) break;
         const uint32_t i = (uint32_t) ci;
+        PoolTailTrace::Task* trace = tail_trace_ && tail_trace_->recording ? &tail_trace_->tasks[i] : nullptr;
+        if (trace) {
+            trace->worker = id;
+#if defined(_WIN32)
+            trace->cpu = (int) GetCurrentProcessorNumber();
+#endif
+            trace->start = PoolTailTrace::now();
+            trace->cycles0 = tail_trace_->track_cycles ? PoolTailTrace::cycles() : 0;
+        }
         if (id >= 0) wstate_[(size_t) id].store(ci, std::memory_order_relaxed);
         else { hstate_.store(ci, std::memory_order_relaxed); hstate_ms_.store(now_ms(), std::memory_order_relaxed); }
         if (mode_ == 0) {
@@ -1196,6 +1305,8 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             const int e = (int) i / parts_b_, part = (int) i % parts_b_;
             const int r0 = H * part / parts_b_, r1 = H * (part + 1) / parts_b_;
             s2_expert_down_rows(jobs_[e].blob, split_[(size_t) e].a2, jobs_[e].out, r0, r1);
+        } else if (mode_ == 7) {
+            drain_native_dag(id);
         } else if (mode_ >= 5) {
             // plan v0.3 P6: native layers, 5 = gate/up rows, 6 = down rows (the layer's own n_ff / n_embd: Flash-Next's
             // FF / H, or another family's smaller expert)
@@ -1216,6 +1327,12 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 const int r0 = row0 + l0, r1 = row0 + l1;
                 SplitBufMulti& sb = split_multi_[(size_t) e];
                 const NativeFmt* const nfmt = mjobs_[e].fmt != nullptr ? mjobs_[e].fmt : nfmt_;   // 149-cold: same types and rows
+                if (trace) {
+                    trace->rows += r1 - r0;
+                    trace->token_rows += (r1 - r0) * mjobs_[e].nt;
+                    trace->nt_max = (std::max)(trace->nt_max, mjobs_[e].nt);
+                    trace->bytes += (uint64_t) (r1 - r0) * (mode_ == 5 ? 2 * nfmt->gu_row : nfmt->d_row);
+                }
                 if (mode_ == 5 && q2_native_kernels(nfmt->gu_type)) {
                     // a native Q2_0 pack: gate and up rows on the Q2_0 kernels, then SwiGLU
                     thread_local float gbuf[MAXT][FF], ubuf[MAXT][FF];
@@ -1265,6 +1382,10 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 r += r1 - r0;
             }
         }
+        if (trace) {
+            trace->cycles1 = tail_trace_->track_cycles ? PoolTailTrace::cycles() : 0;
+            trace->end = PoolTailTrace::now();
+        }
         if (sliced) {
             NodeSync& ns = nsync_[(size_t) s];
             const uint32_t t = (uint32_t) ns.tasks;
@@ -1277,14 +1398,59 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
     }
 }
 
-void ExpertPool::run_phase(int mode, int n_tasks) {
+void ExpertPool::run_phase(int mode, int n_tasks, PublishedWork published_work, void* work_ctx) {
+    auto* tr = tail_trace_ && tail_trace_->selected && (mode == 5 || mode == 6) && numa_n_ == 0 ? tail_trace_ : nullptr;
+    const int64_t t0 = tr ? PoolTailTrace::now() : 0;
     wait_parked("before a phase");
+    if (tail_trace_) tail_trace_->recording = tr != nullptr;
+    if (tr) {
+        ++tr->phase;
+        std::fill(tr->tasks.begin(), tr->tasks.begin() + n_tasks, PoolTailTrace::Task{});
+    }
+    const int64_t faults0 = tr ? PoolTailTrace::faults() : -1;
     mode_ = mode;
     njobs_ = n_tasks;
+    const int64_t p0 = tr ? PoolTailTrace::now() : 0;
     const uint32_t e = begin_batch(n_tasks);
+    const int64_t p1 = tr ? PoolTailTrace::now() : 0;
+    if (published_work) {
+        // Workers now have immutable jobs; the host can submit independent GPU
+        // work without delaying their start or adding a competing CPU thread.
+        static const bool measure = std::getenv("STRATA_REMOTE_OVERLAP_VERIFY") != nullptr;
+        const int before = measure ? done_.load(std::memory_order_acquire) : 0;
+        published_work(work_ctx);
+        if (measure && !numa_phase()) {
+            static thread_local uint64_t calls = 0, progressed = 0, completed = 0;
+            const int delta = done_.load(std::memory_order_acquire) - before;
+            ++calls;
+            progressed += delta > 0;
+            completed += (uint64_t) delta;
+            if (calls == 1 || calls % 4096 == 0)
+                std::fprintf(stderr, "strata overlap progress: %llu calls, %llu advanced, %llu tasks completed during submission\n",
+                             (unsigned long long) calls, (unsigned long long) progressed, (unsigned long long) completed);
+        }
+    }
     if (host_works_) drain(-1, host_scratch_, e);
+    const int64_t hd = tr ? PoolTailTrace::now() : 0;
     wait_done(n_tasks);
+    const int64_t dn = tr ? PoolTailTrace::now() : 0;
     wait_parked("after a phase");
+    const int64_t pk = tr ? PoolTailTrace::now() : 0;
+    if (tail_trace_) tail_trace_->recording = false;
+    if (tr) {
+        const int64_t faults1 = PoolTailTrace::faults();
+        std::fprintf(tr->phases, "%llu,%llu,%lld,%lld,%d,%d,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
+            (unsigned long long) tr->seq, (unsigned long long) tr->phase, (long long) tr->layer,
+            (long long) tr->nt, mode, n_tasks, (long long) t0, (long long) p0, (long long) p1,
+            (long long) hd, (long long) dn, (long long) pk, (long long) faults0, (long long) faults1);
+        for (int task = 0; task < n_tasks; ++task) {
+            const auto& q = tr->tasks[(size_t) task];
+            std::fprintf(tr->tasks_file, "%llu,%llu,%d,%d,%d,%lld,%lld,%llu,%llu,%d,%d,%llu,%d\n",
+                (unsigned long long) tr->seq, (unsigned long long) tr->phase, task, q.worker, q.cpu,
+                (long long) q.start, (long long) q.end, (unsigned long long) q.cycles0, (unsigned long long) q.cycles1,
+                q.rows, q.token_rows, (unsigned long long) q.bytes, q.nt_max);
+        }
+    }
     // Each slice's stamp is stored after its last `done` increment, so `wait_done` can return before it lands; the
     // thread that stored it has parked again since (it left the park to claim), and that re-park is what the wait
     // above acquired.  So the stamps are read here, not in `wait_done`.
@@ -1356,8 +1522,273 @@ void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
     ms_drain_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n) {
-    if (n <= 0) return;
+void ExpertPool::native_dag_rows(int e, bool down, int r0, int r1) {
+    SplitBufMulti& sb = split_multi_[(size_t) e];
+    const NativeFmt* nf = mjobs_[e].fmt != nullptr ? mjobs_[e].fmt : nfmt_;
+    auto& job = mjobs_[e];
+    if (!down && q2_native_kernels(nf->gu_type)) {
+        thread_local float gbuf[MAXT][FF], ubuf[MAXT][FF];
+        float* gp[MAXT]; float* up[MAXT];
+        for (int t = 0; t < job.nt; ++t) { gp[t] = gbuf[t]; up[t] = ubuf[t]; }
+        const int nbk = (int) (nf->n_embd / 64);
+        q2_rows_any(job.blob, nf->gu_row, nbk, job.act, job.nt, gp, r0, r1);
+        q2_rows_any(job.blob + nf->up_off, nf->gu_row, nbk, job.act, job.nt, up, r0, r1);
+        for (int t = 0; t < job.nt; ++t)
+            for (int r = r0; r < r1; ++r)
+                sb.ff[t][r] = (gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]))) * ubuf[t][r];
+    } else if (!down) {
+        float* ff[MAXT];
+        for (int t = 0; t < job.nt; ++t) ff[t] = sb.ff[t];
+        native_gu_rows(*nf, job.blob, job.nact, job.nt, ff, r0, r1);
+    } else if (q2_native_kernels(nf->d_type)) {
+        const ActQ* a2[MAXT];
+        for (int t = 0; t < job.nt; ++t) a2[t] = &sb.a2[t];
+        q2_rows_any(job.blob + nf->down_off, nf->d_row, (int) (nf->n_ff / 64),
+                    a2, job.nt, job.out, r0, r1);
+    } else {
+        const void* hq[MAXT];
+        for (int t = 0; t < job.nt; ++t) hq[t] = sb.hq[t];
+        native_down_rows(*nf, job.blob, hq, job.nt, job.out, r0, r1);
+    }
+}
+
+void ExpertPool::publish_native_expert(int e) {
+    if (!dag_publish_) return;
+    auto& job = mjobs_[e];
+    if (job.ready_sequence == 0) return;
+    // The last acq_rel down decrement acquired all partitions' output stores.
+    // Flush mapped stores before exposing this expert to the GPU consumer.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    for (int t = 0; t < job.nt; ++t) if (job.row_ready[t])
+        std::atomic_ref<uint32_t>(*job.row_ready[t]).store(job.ready_sequence, std::memory_order_release);
+    if (dag_measure_) {
+        dag_published_.fetch_add(1, std::memory_order_relaxed);
+        if (dag_done_.load(std::memory_order_relaxed) + 1 < dag_count_)
+            dag_early_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void ExpertPool::drain_native_ready() {
+    uint32_t spins = 0;
+    const auto started = std::chrono::steady_clock::now();
+    for (;;) {
+        bool worked = false;
+        // Each expert sets one bit once after quantization. Its final claimed
+        // down partition clears it: no full expert scan and no modulo division.
+        for (int word = 0; word < 2; ++word) {
+            const uint64_t bits = dag_ready_words_[word].bits.load(std::memory_order_acquire);
+            if (!bits) continue;
+            const int bit = std::countr_zero(bits);
+            const int e = word * 64 + bit;
+            auto& state = dag_experts_[e];
+            const int part = state.down_next.fetch_add(1, std::memory_order_relaxed);
+            if (part + 1 >= state.down_parts)
+                dag_ready_words_[word].bits.fetch_and(~(uint64_t(1) << bit), std::memory_order_acq_rel);
+            if (part >= state.down_parts) continue;
+            if (dag_measure_ && dag_gu_left_.load(std::memory_order_relaxed) > 0)
+                dag_overlap_.fetch_add(1, std::memory_order_relaxed);
+            native_dag_rows(e, true, (int)nfmt_->n_embd * part / state.down_parts,
+                            (int)nfmt_->n_embd * (part + 1) / state.down_parts);
+            if (state.down_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                publish_native_expert(e);
+                dag_done_.fetch_add(1, std::memory_order_acq_rel);
+            }
+            worked = true; break;
+        }
+        if (worked) continue;
+        int i = dag_next_.load(std::memory_order_relaxed);
+        if (i < (int)dag_gu_.size() &&
+            dag_next_.compare_exchange_strong(i, i + 1, std::memory_order_relaxed)) {
+            const auto task = dag_gu_[(size_t)i];
+            native_dag_rows(task.expert, false, task.r0, task.r1);
+            if (dag_measure_) dag_gu_left_.fetch_sub(1, std::memory_order_relaxed);
+            auto& state = dag_experts_[task.expert];
+            if (state.gu_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                auto& job = mjobs_[task.expert];
+                auto& buf = split_multi_[(size_t)task.expert];
+                for (int t = 0; t < job.nt; ++t)
+                    if (q2_native_kernels(nfmt_->d_type)) act_quant_any(buf.ff[t], FF, buf.a2[t]);
+                    else native_quant_h(*nfmt_, buf.ff[t], buf.hq[t]);
+                dag_ready_words_[task.expert / 64].bits.fetch_or(uint64_t(1) << (task.expert % 64), std::memory_order_release);
+                // Zero means no more downstream tasks can be created.
+                dag_gu_producers_.fetch_sub(1, std::memory_order_acq_rel);
+            }
+            continue;
+        }
+        if (dag_gu_producers_.load(std::memory_order_acquire) == 0 &&
+            dag_ready_words_[0].bits.load(std::memory_order_acquire) == 0 &&
+            dag_ready_words_[1].bits.load(std::memory_order_acquire) == 0) {
+            // All remaining down work is already owned by active drainers.
+            // run_phase still joins them using the existing epoch protocol.
+            if (dag_measure_) dag_empty_exits_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        for (int pause = 0; pause < 8; ++pause) _mm_pause();
+        if ((++spins & 8191u) == 0 && std::chrono::steady_clock::now() - started > kStall) {
+            std::fprintf(stderr, "strata: ready DAG stalled (%d of %d complete)\n", dag_done_.load(), dag_count_);
+            std::abort();
+        }
+    }
+}
+
+void ExpertPool::drain_native_dag(int worker) {
+    if (dag_ready_) { drain_native_ready(); return; }
+    int cursor = worker >= 0 ? worker % dag_count_ : 0;
+    uint32_t spins = 0;
+    const auto started = std::chrono::steady_clock::now();
+    while (dag_done_.load(std::memory_order_acquire) < dag_count_) {
+        bool worked = false;
+        // Consume ready downstream work without waiting for unrelated experts.
+        for (int k = 0; k < dag_count_; ++k) {
+            const int e = (cursor + k) % dag_count_;
+            auto& state = dag_experts_[e];
+            if (state.stage.load(std::memory_order_acquire) != 2) continue;
+            int part = state.down_next.load(std::memory_order_relaxed);
+            if (part >= state.down_parts ||
+                !state.down_next.compare_exchange_strong(part, part + 1, std::memory_order_relaxed)) continue;
+            if (dag_measure_ && dag_gu_left_.load(std::memory_order_relaxed) > 0)
+                dag_overlap_.fetch_add(1, std::memory_order_relaxed);
+            const int r0 = (int) nfmt_->n_embd * part / state.down_parts;
+            const int r1 = (int) nfmt_->n_embd * (part + 1) / state.down_parts;
+            native_dag_rows(e, true, r0, r1);
+            if (state.down_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                state.stage.store(3, std::memory_order_release);
+                publish_native_expert(e);
+                dag_done_.fetch_add(1, std::memory_order_acq_rel);
+            }
+            cursor = (e + 1) % dag_count_;
+            worked = true; break;
+        }
+        if (worked) continue;
+        int i = dag_next_.load(std::memory_order_relaxed);
+        if (i < (int) dag_gu_.size() &&
+            dag_next_.compare_exchange_strong(i, i + 1, std::memory_order_relaxed)) {
+            const auto task = dag_gu_[(size_t) i];
+            native_dag_rows(task.expert, false, task.r0, task.r1);
+            dag_gu_left_.fetch_sub(1, std::memory_order_relaxed);
+            auto& state = dag_experts_[task.expert];
+            // The final acq_rel decrement acquires all writes by this expert's
+            // other GU tasks. Quantization consumes complete rows, unchanged.
+            if (state.gu_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                auto& job = mjobs_[task.expert];
+                auto& buf = split_multi_[(size_t) task.expert];
+                for (int t = 0; t < job.nt; ++t)
+                    if (q2_native_kernels(nfmt_->d_type)) act_quant_any(buf.ff[t], FF, buf.a2[t]);
+                    else native_quant_h(*nfmt_, buf.ff[t], buf.hq[t]);
+                state.stage.store(2, std::memory_order_release);
+            }
+            continue;
+        }
+        _mm_pause();
+        if ((++spins & 65535u) == 0 && std::chrono::steady_clock::now() - started > kStall) {
+            std::fprintf(stderr, "strata: native expert DAG stalled (%d of %d complete)\n",
+                         dag_done_.load(), dag_count_);
+            std::abort();
+        }
+    }
+}
+
+void ExpertPool::run_native_dag(const NativeFmt& f, ExpertJobMulti* jobs, int n,
+                                PublishedWork published_work, void* work_ctx) {
+    static const bool ready = [] { const char* v = std::getenv("STRATA_CPU_DAG_READY"); return v && std::atoi(v) != 0; }();
+    static const bool publish = [] { const char* v = std::getenv("STRATA_CPU_EXPERT_PUBLISH"); return v && std::atoi(v) != 0; }();
+    dag_ready_ = ready; dag_publish_ = publish;
+    if (!dag_experts_) dag_experts_ = std::make_unique<DagExpert[]>(kMaxSplitMulti);
+    const auto started = std::chrono::steady_clock::now();
+    const int threads = (std::max)(1, n_ + (host_works_ ? 1 : 0));
+    for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
+        const int nb = (std::min)(kMaxSplitMulti, n - b0);
+        mjobs_ = jobs + b0; nfmt_ = &f; dag_count_ = nb;
+        int64_t weighted_rows = 0;
+        for (int e = 0; e < nb; ++e) weighted_rows += f.n_ff * mjobs_[e].nt;
+        const int64_t gu_target = (std::max)(int64_t(32), weighted_rows / (threads * 3));
+        // Down shares expert weights across token rows: use its own row budget.
+        const int down_target = (std::max)(64, (int) (nb * f.n_embd) / (threads * 2));
+        dag_gu_.clear();
+        for (int e = 0; e < nb; ++e) {
+            const int64_t work = f.n_ff * mjobs_[e].nt;
+            const int gu_parts = (int) std::clamp<int64_t>((work + gu_target - 1) / gu_target, 1, f.n_ff / 32);
+            auto& state = dag_experts_[e];
+            state.gu_left.store(gu_parts, std::memory_order_relaxed);
+            state.down_parts = ((int) f.n_embd + down_target - 1) / down_target;
+            state.down_next.store(0, std::memory_order_relaxed);
+            state.down_left.store(state.down_parts, std::memory_order_relaxed);
+            state.stage.store(0, std::memory_order_relaxed);
+            for (int part = 0; part < gu_parts; ++part)
+                dag_gu_.push_back({e, (int) f.n_ff * part / gu_parts, (int) f.n_ff * (part + 1) / gu_parts});
+        }
+        dag_next_.store(0, std::memory_order_relaxed);
+        dag_done_.store(0, std::memory_order_relaxed);
+        dag_gu_left_.store((int) dag_gu_.size(), std::memory_order_relaxed);
+        if (dag_ready_) {
+            dag_gu_producers_.store(nb, std::memory_order_relaxed);
+            for (auto& word : dag_ready_words_) word.bits.store(0, std::memory_order_relaxed);
+        }
+        // Use the existing epoch-protected claim/park protocol to enroll
+        // drainers. Each enrolled drainer processes the dependency queue.
+        run_phase(7, threads, b0 == 0 ? published_work : nullptr, work_ctx);
+        if (dag_done_.load(std::memory_order_acquire) != nb) {
+            std::fprintf(stderr, "strata: ready DAG returned with unfinished experts\n");
+            std::abort();
+        }
+    }
+    multi_bytes += (int64_t) n * (int64_t) f.bytes;
+    mode_ = 0;
+    ms_drain_ += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+}
+
+void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n,
+                                        PublishedWork published_work, void* work_ctx) {
+    if (n <= 0) {
+        if (published_work) published_work(work_ctx);
+        return;
+    }
+    static const bool dag = [] { const char* v = std::getenv("STRATA_CPU_EXPERT_DAG"); return v && std::atoi(v) != 0; }();
+    static const bool verify = [] { const char* v = std::getenv("STRATA_CPU_EXPERT_DAG_VERIFY"); return v && std::atoi(v) != 0; }();
+    static thread_local bool reference_pass = false;
+    if (dag && !reference_pass && numa_n_ == 0 && f.n_embd == H && f.n_ff == FF) {
+        dag_measure_ = verify;
+        run_native_dag(f, jobs, n, published_work, work_ctx);
+        ++dag_calls_;
+        if (verify && (dag_calls_ == 1 || dag_calls_ % 97 == 0)) {
+            // Published output is already visible to a concurrent GPU reader.
+            // Run the reference into private rows, never rewrite live results.
+            size_t row_count = 0;
+            for (int e = 0; e < n; ++e) row_count += jobs[e].nt;
+            std::vector<float> expected(row_count * H);
+            std::vector<ExpertJobMulti> reference_jobs(jobs, jobs + n);
+            size_t offset = 0;
+            for (auto& job : reference_jobs) {
+                job.ready_sequence = 0;
+                for (int t = 0; t < job.nt; ++t) {
+                    job.out[t] = expected.data() + offset;
+                    job.row_ready[t] = nullptr;
+                    offset += H;
+                }
+            }
+            reference_pass = true;
+            run_split_multi_native(f, reference_jobs.data(), n);
+            reference_pass = false;
+            offset = 0;
+            for (int e = 0; e < n; ++e) for (int t = 0; t < jobs[e].nt; ++t) {
+                if (std::memcmp(expected.data() + offset, jobs[e].out[t], H * sizeof(float)) != 0) {
+                    std::fprintf(stderr, "strata: native DAG differs bitwise, expert %d token %d\n", e, t);
+                    std::abort();
+                }
+                offset += H;
+            }
+            ++dag_checks_;
+            if (dag_checks_ == 1 || dag_checks_ % 64 == 0)
+                std::fprintf(stderr, "strata CPU completion: %llu published experts, %llu before final expert, %llu empty-drainer exits\n",
+                    (unsigned long long)dag_published_.load(), (unsigned long long)dag_early_.load(),
+                    (unsigned long long)dag_empty_exits_.load());
+            if (dag_checks_ == 1 || dag_checks_ % 64 == 0)
+                std::fprintf(stderr, "strata native DAG: %llu batches, %llu bitwise checks, %llu downstream tasks overlapped remaining GU\n",
+                    (unsigned long long) dag_calls_, (unsigned long long) dag_checks_,
+                    (unsigned long long) dag_overlap_.load());
+        }
+        return;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
@@ -1367,7 +1798,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         mrows_ = (int64_t) nb * f.n_ff;
         mtasks_ = numa_n_ > 0 ? numa_plan_phase((int) f.n_ff, nb) : phase_tasks(mrows_);
         const auto a = std::chrono::steady_clock::now();
-        run_phase(5, mtasks_);
+        run_phase(5, mtasks_, b0 == 0 ? published_work : nullptr, work_ctx);
         const auto b = std::chrono::steady_clock::now();
         for (int e = 0; e < nb; ++e)
             for (int t = 0; t < mjobs_[e].nt; ++t)

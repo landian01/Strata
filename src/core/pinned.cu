@@ -4,6 +4,10 @@
 #include "strata/core/pin_budget.hpp"
 
 #include <cuda_runtime.h>
+#if defined(_WIN32) && !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && CUDART_VERSION >= 13000
+#include <cuda.h>
+#define STRATA_HOST_VMM 1
+#endif
 
 #include <atomic>
 #include <climits>
@@ -399,6 +403,89 @@ std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
     if (!b.empty()) b.push_back(b.back() + slice);
     return b;
 }
+
+bool host_vmm_requested() {
+    const char* e = std::getenv("STRATA_ARENA_VMM");
+    return e && std::string(e) == "1";
+}
+
+void release_host_vmm(PinnedArena& a) {
+#ifdef STRATA_HOST_VMM
+    for (const auto& chunk : a.vmm_chunks)
+        cuMemUnmap((CUdeviceptr) a.base + chunk.first, chunk.second);
+    if (a.base) cuMemAddressFree((CUdeviceptr) a.base, a.mapping_bytes);
+#endif
+    a.vmm_chunks.clear();
+    a.base = nullptr;
+    a.mapping_bytes = 0;
+    a.vmm_device = -1;
+    a.registered_bytes = 0;
+}
+
+bool reserve_host_vmm(PinnedArena& a) {
+#ifdef STRATA_HOST_VMM
+    int device = 0, supported = 0;
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
+                             device) != CUDA_SUCCESS || !supported) {
+        a.note = "CUDA host VMM is not supported by this device/driver";
+        (void) cudaGetLastError();
+        return false;
+    }
+    CUmemAllocationProp prop{};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type = CU_MEM_LOCATION_TYPE_HOST;
+    size_t granularity = 0;
+    CUresult e = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    CUdeviceptr address = 0;
+    if (e == CUDA_SUCCESS && granularity && a.capacity <= UINT64_MAX - granularity) {
+        a.mapping_bytes = ((a.capacity + granularity - 1) / granularity) * granularity;
+        e = cuMemAddressReserve(&address, a.mapping_bytes, granularity, 0, 0);
+    } else if (e == CUDA_SUCCESS) {
+        e = CUDA_ERROR_INVALID_VALUE;
+    }
+    if (e == CUDA_SUCCESS) {
+        a.base = (void*) address;
+        a.vmm_device = device;
+        // One large cuMemCreate can fail even when the same total fits in smaller allocations.
+        const char* chunk_env=std::getenv("STRATA_ARENA_VMM_CHUNK_MIB");
+        const uint64_t chunk_target=chunk_env ? uint64_t(std::clamp(std::atoi(chunk_env),2,1024))<<20 : 1ull<<30;
+        const uint64_t chunk_bytes = std::max<uint64_t>(granularity, (chunk_target / granularity) * granularity);
+        CUmemAccessDesc access[2]{};
+        access[0].location.type = CU_MEM_LOCATION_TYPE_HOST;
+        access[0].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        access[1].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        access[1].location.id = device;
+        access[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        for (uint64_t off = 0; off < a.mapping_bytes; off += chunk_bytes) {
+            const uint64_t n = std::min(chunk_bytes, a.mapping_bytes - off);
+            CUmemGenericAllocationHandle handle{};
+            e = cuMemCreate(&handle, n, &prop, 0);
+            if (e != CUDA_SUCCESS) break;
+            e = cuMemMap(address + off, n, 0, handle, 0);
+            cuMemRelease(handle);  // the mapping owns the remaining reference
+            if (e != CUDA_SUCCESS) break;
+            a.vmm_chunks.emplace_back(off, n);
+            e = cuMemSetAccess(address + off, n, access, 2);
+            if (e != CUDA_SUCCESS) break;
+        }
+    }
+    if (e != CUDA_SUCCESS) {
+        const char* name = nullptr;
+        cuGetErrorName(e, &name);
+        a.note = std::string("CUDA host VMM allocation failed: ") + (name ? name : "unknown driver error");
+        release_host_vmm(a);
+        return false;
+    }
+    a.registered_bytes = a.capacity;
+    a.note = "CUDA host VMM: entire arena mapped on GPU " + std::to_string(device) +
+             " only, " + std::to_string(a.vmm_chunks.size()) + " chunks; bounded helper access may be added after cache allocation";
+    return true;
+#else
+    a.note = "STRATA_ARENA_VMM requires the Windows CUDA 13 build";
+    return false;
+#endif
+}
 }  // namespace
 
 PinnedArena::PinnedArena(uint64_t bytes, uint64_t slice) : PinnedArena(bytes, uniform_bounds(bytes, slice)) {
@@ -409,6 +496,14 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                          uint64_t max_pinned_bytes, const std::string& shared_file,
                          uint64_t shared_pack_hash) : capacity(bytes) {
     if (bytes == 0) return;
+    if (host_vmm_requested()) {
+        if (!shared_file.empty() || max_pinned_bytes || arena_pin_cap_gib() != 0) {
+            note = "STRATA_ARENA_VMM requires STRATA_ARENA_PIN_GIB=0 and no shared arena file";
+            return;
+        }
+        reserve_host_vmm(*this);
+        return;
+    }
     base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes);
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
@@ -655,6 +750,10 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
 }
 
 PinnedArena::~PinnedArena() {
+    if (vmm_device >= 0) {
+        release_host_vmm(*this);
+        return;
+    }
     if (base && by_need) {
         for (const auto& r : locked_ranges) strata::platform::unlock_resident((uint8_t*) base + r.first, r.second);
         for (const auto& r : pin_ranges) pin_unregister((uint8_t*) base + r.first);

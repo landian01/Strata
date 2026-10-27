@@ -38,7 +38,7 @@ STRATA_ROWS_FN inline float ggml_hsum8(__m256 x) {
 template <int NT, bool GGML = false> STRATA_ROWS_FN
 inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res);
 
-template <int TY> STRATA_ROWS_FN
+template <int TY, bool UNROLL = false, int NSUM = 2> STRATA_ROWS_FN
 inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K* y) {
     if constexpr (TY == 17) {
         const block_q8_K* act[1] = {y};
@@ -51,8 +51,24 @@ inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K*
     for (int i = 0; i < nblocks; ++i) {
         const uint8_t* blk = row + (size_t) i * Fmt32<TY>::bytes;
         rows_ahead(blk, pf);
-        __m256i sums[2] = {_mm256_setzero_si256(), _mm256_setzero_si256()};
-        for (int j = 0; j < 4; ++j)
+        __m256i sums[NSUM];
+        for (int a = 0; a < NSUM; ++a) sums[a] = _mm256_setzero_si256();
+        if constexpr (UNROLL) {
+            // Constant offsets let MSVC fold IQ3_S's scale/sign/index extraction.
+            // Integer lanes are summed exactly; the block-order floating FMAs stay unchanged.
+#define STRATA_IQ_ONE(J, HALF) do { \
+            __m256i g, sign, scale; \
+            Fmt32<TY>::decode(blk, J, HALF, g, sign, scale); \
+            const __m256i a = _mm256_loadu_si256((const __m256i*) (y[i].qs + 64 * (J) + 32 * (HALF))); \
+            constexpr int dst = (2 * (J) + (HALF)) % NSUM; \
+            sums[dst] = madd_add(sums[dst], _mm256_maddubs_epi16(g, _mm256_sign_epi8(a, sign)), scale); \
+        } while (0)
+            STRATA_IQ_ONE(0, 0); STRATA_IQ_ONE(0, 1);
+            STRATA_IQ_ONE(1, 0); STRATA_IQ_ONE(1, 1);
+            STRATA_IQ_ONE(2, 0); STRATA_IQ_ONE(2, 1);
+            STRATA_IQ_ONE(3, 0); STRATA_IQ_ONE(3, 1);
+#undef STRATA_IQ_ONE
+        } else for (int j = 0; j < 4; ++j)
             for (int half = 0; half < 2; ++half) {
                 __m256i g, sign, scale;
                 Fmt32<TY>::decode(blk, j, half, g, sign, scale);
@@ -60,20 +76,21 @@ inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K*
                 const __m256i signed_act = _mm256_sign_epi8(act, sign);
                 sums[half] = madd_add(sums[half], _mm256_maddubs_epi16(g, signed_act), scale);
             }
+        for (int a = 1; a < NSUM; ++a) sums[0] = _mm256_add_epi32(sums[0], sums[a]);
         const float d = h2f(u16(blk)) * y[i].d;
-        accum = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(_mm256_add_epi32(sums[0], sums[1])), accum);
+        accum = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sums[0]), accum);
     }
     if constexpr (TY == 16 || TY == 17 || TY == 22 || TY == 122) return 0.125f * ggml_hsum8(accum);
     else if constexpr (TY == 18 || TY == 118) return 0.25f * ggml_hsum8(accum);
     else return ggml_hsum8(accum);
 }
 
-template <int TY> STRATA_ROWS_FN
+template <int TY, bool UNROLL = false, int NSUM = 2> STRATA_ROWS_FN
 void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_K* y, float* ff,
                  int r0, int r1) {
     for (int r = r0; r < r1; ++r) {
-        const float g = row_dot_ggml_one<TY>(blob + (size_t) r * gu_row, n / QK_K, y);
-        const float u = row_dot_ggml_one<TY>(blob + up_off + (size_t) r * gu_row, n / QK_K, y);
+        const float g = row_dot_ggml_one<TY, UNROLL, NSUM>(blob + (size_t) r * gu_row, n / QK_K, y);
+        const float u = row_dot_ggml_one<TY, UNROLL, NSUM>(blob + up_off + (size_t) r * gu_row, n / QK_K, y);
         ff[r] = (g / (1.f + std::exp(-g))) * u;
     }
 }

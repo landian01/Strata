@@ -457,6 +457,16 @@ void q8k_quant_avx2(const float* x, void* vy, int64_t k) {
 void iq256_gu_rows_exact_one(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
                              const void* act, float* ff, int r0, int r1) {
     const auto* y = (const block_q8_K*) act;
+    // Isolated opt-in for the measured AVX2 singleton path; all other dispatch stays unchanged.
+    static const int exact_mode = [] {
+        const char* v = std::getenv("STRATA_IQ256_EXACT_MODE");
+        return v ? std::atoi(v) : 0;
+    }();
+    if (type == 21 && (exact_mode == 1 || exact_mode == 2) && !(iq256_variant() & (kIq256Gather | kIq256Vnni))) {
+        if (exact_mode == 1) plain::gu_ggml_one<21, true, 2>(blob, gu_row, up_off, n, y, ff, r0, r1);
+        else plain::gu_ggml_one<21, true, 4>(blob, gu_row, up_off, n, y, ff, r0, r1);
+        return;
+    }
 #if STRATA_AVXVNNI
     if (vnni_on()) {
         if (type == 16) vnni::gu_ggml_one<16>(blob, gu_row, up_off, n, y, ff, r0, r1);

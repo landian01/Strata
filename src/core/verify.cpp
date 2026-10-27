@@ -4,6 +4,9 @@
 #include "strata/core/sm120_series.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/core/verify.hpp"
+#include "strata/core/remote_transfer.hpp"
+#include "strata/core/gpu_tasks.hpp"
+#include "strata/core/remote_experts.hpp"
 #include "strata/core/pin_budget.hpp"
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
 #include "strata/core/host_graph_launch.hpp"
@@ -604,6 +607,183 @@ void Verifier::diag(std::FILE* f) const {
 }
 
 
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+struct Verifier::GpuTaskState {
+    GpuTaskPacket *host = nullptr, *mapped = nullptr;
+    GpuExpertAddress *addresses = nullptr, *device = nullptr;
+    std::vector<int> pcie;
+    RemoteExperts* helper = nullptr;
+    uint64_t helper_cache_bytes = 0;
+    int tail = 0, min_one = 0, helper_cold_cap = 0, joint_schedule = 0;
+    std::vector<GpuScheduleCost> cost;
+    GpuColdCacheEntry* reuse_entries=nullptr;
+    GpuColdCachePlan* reuse_plan=nullptr;
+    uint32_t* reuse_clock=nullptr;
+    uint64_t* reuse_stats=nullptr;
+    uint8_t* reuse_weights=nullptr;
+    int reuse_slots=0,reuse_blocks=64;
+    ~GpuTaskState() {
+        if(reuse_stats) {
+            uint64_t stats[6]={};
+            if(cudaMemcpy(stats,reuse_stats,sizeof(stats),cudaMemcpyDeviceToHost)==cudaSuccess)
+                std::fprintf(stderr,"strata primary reuse lifetime: %llu groups, %llu rows, %llu admissions, %llu replacements, %llu hit weight bytes, %llu admitted bytes\n",
+                    (unsigned long long)stats[0],(unsigned long long)stats[1],(unsigned long long)stats[2],
+                    (unsigned long long)stats[3],(unsigned long long)stats[4],(unsigned long long)stats[5]);
+            cudaFree(reuse_stats);
+        }
+        if(reuse_entries)cudaFree(reuse_entries);
+        if(reuse_plan)cudaFree(reuse_plan);
+        if(reuse_clock)cudaFree(reuse_clock);
+        if(reuse_weights)cudaFree(reuse_weights);
+        if (device) cudaFree(device);
+        if (addresses) cudaFreeHost(addresses);
+        if (host) cudaFreeHost(host);
+    }
+};
+
+bool Verifier::prepare_gpu_tasks(int T, std::string& err) {
+    auto on = [](const char* key) { const char* s = std::getenv(key); return s && std::atoi(s) != 0; };
+    auto ck = [&](cudaError_t e) {
+        if (e == cudaSuccess) return true;
+        err = std::string("GPU task setup: ") + cudaGetErrorString(e); return false;
+    };
+    if (on("STRATA_GPU_FETCH_OVERLAP") && !fetch_stream_) {
+        if (sink_.pcie_mode != 2 || split_) { err = "fetch overlap requires copy-kernel PCIe and unsplit windows"; return false; }
+        int priority = 0;
+        if (on("STRATA_GPU_FETCH_PRIORITY")) {
+            int least = 0;
+            if (!ck(cudaDeviceGetStreamPriorityRange(&least, &priority))) return false;
+        }
+        if (!ck(cudaStreamCreateWithPriority(&fetch_stream_, cudaStreamNonBlocking, priority)) ||
+            !ck(cudaEventCreateWithFlags(&fetch_fork_, cudaEventDisableTiming)) ||
+            !ck(cudaEventCreateWithFlags(&fetch_join_, cudaEventDisableTiming))) return false;
+        std::fprintf(stderr, "strata gpu fetch: separate stream overlaps resident compute, priority %d\n", priority);
+    }
+    if (!on("STRATA_GPU_TASKS")) return true;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    auto* d = gpu_dispatch_;
+    const char* cold = std::getenv("STRATA_COLD_OVERLAP");
+    if (!d || !lay.native || d->remote_count != 1 || d->peer || d->fs || d->lookahead ||
+        d->pcie_model.on || split_ || batch_rec_ || next_ || lb_ != 0 || le_ != g_->n_layers ||
+        !separate_rows_ || remote_opt_ || device_plan_ || all_resident_ || sink_.pcie_mode != 2 ||
+        ss_->k != 10 || g_->n_embd != 2560 || T > 8 || (cold && std::atoi(cold) != 0) ||
+        d->src->linux_file_defaults()) {
+        err = "GPU tasks require one ordinary helper, warm native 2560/10 model, separate rows, copy-kernel PCIe, no split/batch/foresight/balance";
+        return false;
+    }
+    // Cache slots may be reused by the asynchronous adaptive upload. No GPU
+    // packet may reference the new host table until those copies have landed.
+    if (adapt_gate_ && adapt_gate_->active.load(std::memory_order_acquire) &&
+        !adapt_gate_wait((int32_t)g_->n_layers, err)) return false;
+    const size_t count = (size_t)g_->n_layers * (size_t)d->n_expert;
+    if (!gpu_tasks_) {
+        gpu_tasks_ = new GpuTaskState;
+        auto& state = *gpu_tasks_;
+        state.helper = d->remote[0];
+        const char* reuse_env=std::getenv("STRATA_PRIMARY_REUSE_SLOTS");
+        state.reuse_slots=reuse_env?std::clamp(std::atoi(reuse_env),0,4):0;
+        if(state.reuse_slots) {
+            if(!fetch_stream_) {err="primary reuse requires bulk fetch overlap and GPU tasks";return false;}
+            size_t bytes=0;
+            std::vector<GpuColdCacheEntry> slots((size_t)g_->n_layers*state.reuse_slots);
+            for(int l=0;l<g_->n_layers;++l)bytes+=((lay.blob_bytes(l)+255u)&~size_t(255u))*state.reuse_slots;
+            size_t free=0,total=0;if(!ck(cudaMemGetInfo(&free,&total)))return false;
+            if(free<bytes+(256ull<<20)){err="primary reuse needs 256 MiB headroom after allocation";return false;}
+            if(!ck(cudaMalloc((void**)&state.reuse_weights,bytes)) ||
+               !ck(cudaMalloc((void**)&state.reuse_entries,slots.size()*sizeof(slots[0]))) ||
+               !ck(cudaMalloc((void**)&state.reuse_plan,sizeof(GpuColdCachePlan))) ||
+               !ck(cudaMalloc((void**)&state.reuse_clock,g_->n_layers*sizeof(uint32_t))) ||
+               !ck(cudaMalloc((void**)&state.reuse_stats,6*sizeof(uint64_t))))return false;
+            size_t offset=0;
+            for(int l=0;l<g_->n_layers;++l)for(int s=0;s<state.reuse_slots;++s) {
+                slots[(size_t)l*state.reuse_slots+s]={-1,0,(uint64_t)(state.reuse_weights+offset)};
+                offset+=(lay.blob_bytes(l)+255u)&~size_t(255u);
+            }
+            if(!ck(cudaMemcpy(state.reuse_entries,slots.data(),slots.size()*sizeof(slots[0]),cudaMemcpyHostToDevice)) ||
+               !ck(cudaMemset(state.reuse_clock,0,g_->n_layers*sizeof(uint32_t))) ||
+               !ck(cudaMemset(state.reuse_stats,0,6*sizeof(uint64_t))))return false;
+            const char* blocks=std::getenv("STRATA_GPU_FETCH_BLOCKS");
+            state.reuse_blocks=blocks?std::clamp(std::atoi(blocks),16,384):384;
+            std::fprintf(stderr,"strata primary reuse: %d slots/layer, %.2f MiB; publish after copy, protect current hits\n",state.reuse_slots,bytes/(1024.*1024.));
+        }
+        const char* policy=std::getenv("STRATA_SCHED_THREEWAY");
+        state.joint_schedule=policy?std::clamp(std::atoi(policy),0,2):0;
+        const char* cold_cap = std::getenv("STRATA_REMOTE_COLD_CAP");
+        state.helper_cold_cap = cold_cap ? std::clamp(std::atoi(cold_cap),0,16) : 0;
+        if (state.helper_cold_cap > 0) {
+            const char* vmm = std::getenv("STRATA_ARENA_VMM");
+            if (!vmm || std::atoi(vmm)!=1) {
+                err="helper cold tasks require host VMM and bounded helper access"; return false;
+            }
+        }
+        auto value = [](const char* key, float fallback, bool allow_zero = false) {
+            const char* v=std::getenv(key); const float x=v?(float)std::atof(v):fallback;
+            return std::isfinite(x) && (x>0 || (allow_zero && x==0)) ? x:fallback;
+        };
+        state.cost.resize((size_t)g_->n_layers);
+        for (int l=0;l<g_->n_layers;++l) {
+            auto& c=state.cost[l]; const float bytes=(float)lay.blob_bytes(l);
+            c.fetch[0]=bytes/(value("STRATA_SCHED_MAIN_GBPS",11.46f)*1000.f);
+            c.fetch[1]=bytes/(value("STRATA_SCHED_HELPER_GBPS",3.02f)*1000.f);
+            c.group[0]=value("STRATA_SCHED_MAIN_GROUP_US",3.f);
+            c.group[1]=value("STRATA_SCHED_HELPER_GROUP_US",8.f);
+            c.row[0]=value("STRATA_SCHED_MAIN_ROW_US",0.5f);
+            c.row[1]=value("STRATA_SCHED_HELPER_ROW_US",2.f);
+            c.helper_start=value("STRATA_SCHED_HELPER_START_US",20.f);
+            c.helper_return=value("STRATA_SCHED_HELPER_RETURN_US",1.0f);
+            c.cpu_group=bytes/(value("STRATA_SCHED_CPU_GBPS",16.34f)*1000.f);
+            c.cpu_row=value("STRATA_SCHED_CPU_ROW_US",2.f);
+            c.cpu_start=value("STRATA_SCHED_CPU_START_US",20.f);
+            c.cpu_ram=bytes/(value("STRATA_SCHED_RAM_GBPS",31.f)*1000.f);
+            c.main_cpu=value("STRATA_SCHED_MAIN_CPU_PENALTY",0.64f,true);
+            c.helper_cpu=value("STRATA_SCHED_HELPER_CPU_PENALTY",0.50f,true);
+            c.cpu_main=value("STRATA_SCHED_CPU_MAIN_PENALTY",0.42f,true);
+            c.cpu_helper=value("STRATA_SCHED_CPU_HELPER_PENALTY",0.15f,true);
+            c.gpu_cross=value("STRATA_SCHED_GPU_CROSS_PENALTY",0.05f,true);
+        }
+        if (!ck(cudaHostAlloc((void**)&state.host, (le_-lb_) * sizeof(GpuTaskPacket), cudaHostAllocMapped | cudaHostAllocPortable)) ||
+            !ck(cudaHostGetDevicePointer((void**)&state.mapped, state.host, 0)) ||
+            !ck(cudaHostAlloc((void**)&state.addresses, count * sizeof(GpuExpertAddress), cudaHostAllocPortable)) ||
+            !ck(cudaMalloc((void**)&state.device, count * sizeof(GpuExpertAddress)))) return false;
+        std::memset(state.host, 0, (le_-lb_) * sizeof(GpuTaskPacket));
+        state.pcie.resize((size_t)g_->n_layers);
+        for (int l = 0; l < g_->n_layers; ++l) for (int e = 0; e < d->n_expert; ++e) {
+            auto& a = state.addresses[(size_t)l * d->n_expert + e];
+            a.remote = state.helper->cached_address(l, e);
+            a.helper_mapped = state.helper->cold_address(l,e);
+            a.mapped = d->src->pinned(l, e) ? (uint64_t)d->src->device_alias(l, e) : 0;
+        }
+        always_publish_ = true;
+        sink_.track_remote(sink_.ctx, state.helper->device(), state.helper->stream_handle());
+        std::fprintf(stderr, "strata gpu tasks: primary classifies/groups/publishes; CPU consumes grouped fallback only\n");
+    }
+    auto& state = *gpu_tasks_;
+    // The remote cache can replace weights between drained windows. Its slot
+    // addresses stay stable, but their expert identities do not. Refresh this
+    // ownership table before the next graph sees any new primary promotions.
+    const uint64_t helper_bytes = state.helper->cache_upload_bytes();
+    if (helper_bytes != state.helper_cache_bytes) {
+        for (int l = 0; l < g_->n_layers; ++l)
+            for (int e = 0; e < d->n_expert; ++e)
+                state.addresses[(size_t)l * d->n_expert + e].remote = state.helper->cached_address(l,e);
+        state.helper_cache_bytes = helper_bytes;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const int slot = d->host_res[i];
+        state.addresses[i].primary = slot < 0 ? 0 : (uint64_t)(d->cache_base +
+            (d->cache_slot_off ? (size_t)d->cache_slot_off[slot] : (size_t)slot * d->cache_blob));
+    }
+    for (int l = 0; l < g_->n_layers; ++l) state.pcie[l] = d->src->pcie_layer(l) ? d->pcie_num : 0;
+    state.tail = on("STRATA_MULTIGPU_TAIL_SKIP") ? tail_skip_rank() : 0;
+    state.min_one = on("STRATA_PCIE_MIN1");
+    if (!ck(cudaMemcpyAsync(state.device, state.addresses, count * sizeof(GpuExpertAddress), cudaMemcpyHostToDevice, cs_))) return false;
+    if (!state.helper->prepare_gpu_window(state.host, (int)lb_, (int)le_, T, h_x_, h_ymiss_, h_row_ready_, h_flag_, err)) return false;
+    for (int l = 0; l < le_-lb_; ++l) state.host[l].ready = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return true;
+}
+#endif
+
 Verifier::~Verifier() {
 #if defined(STRATA_GPU_METAL)
     strata::metal_engine::window_destroy(metal_);
@@ -617,6 +797,15 @@ Verifier::~Verifier() {
     }
     if (cs_) cudaStreamSynchronize(cs_);
     if (sh_cs_) cudaStreamSynchronize(sh_cs_);
+    // Drain auxiliary writes before releasing shared targets, also after abort.
+    for (auto& slot : remote_streams_) {
+        cudaStream_t remote = slot.stream.load(std::memory_order_acquire);
+        if (remote) {
+            const OnDevice on(slot.device.load(std::memory_order_relaxed));
+            (void) cudaStreamSynchronize(remote);
+            (void) cudaGetLastError();
+        }
+    }
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
     for (auto& e : exec_nr_)
@@ -637,6 +826,12 @@ Verifier::~Verifier() {
     if (logit_bias_device_) cudaFree(logit_bias_device_);
     if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours
     if (sh_cs_) cudaStreamDestroy(sh_cs_);
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    if (fetch_stream_) { cudaStreamSynchronize(fetch_stream_); cudaStreamDestroy(fetch_stream_); }
+    if (fetch_fork_) cudaEventDestroy(fetch_fork_);
+    if (fetch_join_) cudaEventDestroy(fetch_join_);
+    delete gpu_tasks_;
+#endif
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
     if (side_) cudaStreamDestroy(side_);
     if (side2_) cudaStreamDestroy(side2_);
@@ -656,7 +851,7 @@ Verifier::~Verifier() {
     if (arena_) cudaFree(arena_);
     if (hcount_d_) cudaFree(hcount_d_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
-                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_};
+                     h_flagA_, h_plan_, h_flagB_, h_plan_err_, h_nf_, herr_h_, hdrop_h_, h_bal_, h_row_ready_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -782,6 +977,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(64, (void**) &h_plan_err_, (void**) &m_plan_err_) &&
               mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_);
     if (!ok) { err = "verify: mapped staging allocation failed " + strata::core::pin_exhausted_hint(); return false; }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    const char* sr = std::getenv("STRATA_REMOTE_SEPARATE_READY");
+    separate_rows_ = sr && std::atoi(sr) != 0;
+    if (separate_rows_) {
+        if (remote_opt_ || K != 10 || N % 4 != 0 ||
+            !mapped(2 * T * K * sizeof(uint32_t), (void**) &h_row_ready_, (void**) &m_row_ready_)) {
+            err = "verify: separate result rows require ordinary native helper IO and mapped flags"; return false;
+        }
+        std::memset(h_row_ready_, 0, 2 * T * K * sizeof(uint32_t));
+        std::fprintf(stderr, "strata scheduler: producer-owned row completion enabled\n");
+    }
+#endif
     // DFlash2 taps: set_taps (the drafter) or STRATA_TAP_FILE (the research dump); off, and nothing is allocated or captured, otherwise
     const char* tap_path = std::getenv("STRATA_TAP_FILE");
     if (tap_path != nullptr && tap_path[0] == '\0') tap_path = nullptr;
@@ -851,6 +1058,17 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.publish = &Verifier::publish_plan;
         sink_.fetch = &Verifier::fetch_dma;
         sink_.ctx = this;
+        if (separate_rows_) sink_.track_remote = [](void* context, int device, void* stream) {
+            auto& self = *static_cast<Verifier*>(context);
+            for (auto& slot : self.remote_streams_) {
+                const auto old = slot.stream.load(std::memory_order_acquire);
+                if (old == (cudaStream_t) stream) return;
+                if (!old) {
+                    slot.device.store(device, std::memory_order_relaxed);
+                    slot.stream.store((cudaStream_t) stream, std::memory_order_release); return;
+                }
+            }
+        };
     }
 
     // APR: the rotated copy of the expert input (nat_xr_, T x N floats) only where a layer's gate/up is
@@ -1064,6 +1282,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
         // (not with set_always_publish: the device table may lag the host's while windows are in flight)
         device_plan_ = !all_resident_ && !always_publish_ && (v != nullptr && std::atoi(v) != 0);
+        if (separate_rows_ && (device_plan_ || all_resident_)) {
+            err = "separate rows cannot be combined with resident-only device plans"; return false;
+        }
     }
     // (halo's STRATA_VERIFY_RESIDENT=1 is this window's all_resident_ graph above, which 0.1.39 has on by default)
     if (g_qfuse() || g_qfuse_hc()) {   // S26: the HC read's q8_1 group counters, zeroed once (each launch leaves them zero)
@@ -1991,6 +2212,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                               hits_.cache_base, slot_off_d_, (long long) hits_.blob,
                               plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
                               (uint32_t) ((l - lb_) * G + grp + 1), cs);
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+            // Reset before publishing this group, including after graph replay.
+            if (separate_rows_) remote_reset_ready(m_row_ready_ + (size_t) grp * max_t_ * K, (int) (n * K), cs);
+#endif
 #if defined(STRATA_USE_HIP)
             if (g_doorbell_store)   // #649 A/B: the step's ring stored, not incremented over PCIe
                 doorbell_publish_value(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
@@ -2007,6 +2232,30 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 doorbell_publish_res(xm, ids_ + tb * K, layer_res, (int) g.n_expert, (int64_t) n * N, (int64_t) n * K,
                                      m_x_ + tb * N, m_ids_ + tb * K, m_seq_, cs);
             }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+            if (gpu_tasks_) {
+                GpuTaskPlan task{};
+                task.ids = ids_ + tb * K;
+                task.addresses = gpu_tasks_->device + (size_t)l * NE;
+                task.plan = plan_ + (size_t)grp * (plan_i32_ + 16);
+                task.host_counts = m_plan_ + (size_t)grp * plan_i32_;
+                task.packet = gpu_tasks_->mapped + l - lb_;
+                task.flag_a = m_flagA_; task.flag_b = m_flagB_;
+                task.n = n * (int)K; task.k = (int)K; task.experts = (int)NE;
+                task.cap = max_t_ * (int)K; task.staging_cap = (int)kStagingBlobs;
+                task.pcie_num = gpu_tasks_->pcie[l]; task.tail_rank = gpu_tasks_->tail;
+                task.min_one = gpu_tasks_->min_one; task.sequence = (uint32_t)(l-lb_+1);
+                task.helper_cold_cap = gpu_tasks_->helper_cold_cap; task.cost = gpu_tasks_->cost[l];
+                task.joint_schedule = gpu_tasks_->joint_schedule;
+                if(gpu_tasks_->reuse_slots) {
+                    task.cold_cache=gpu_tasks_->reuse_entries+(size_t)l*gpu_tasks_->reuse_slots;
+                    task.cold_cache_slots=gpu_tasks_->reuse_slots;task.cold_plan=gpu_tasks_->reuse_plan;
+                    task.cold_clock=gpu_tasks_->reuse_clock+l;task.cold_stats=gpu_tasks_->reuse_stats;
+                    task.cold_stage=(uint64_t)staging_;task.blob_bytes=strata::kernels::cpu::expert_layout().blob_bytes(l);
+                }
+                gpu_tasks_plan(task, cs);
+            }
+#endif
             if (sh_fork_late) {
                 cudaEventRecord(ev_fork_, cs);
                 cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
@@ -2109,6 +2358,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             grouped(p_ptr, p_start, p_counts, 0, parts_out);
             stamp(l, 20, grp);
         } else {
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+            if (gpu_tasks_) { /* The plan was produced before shared expert work. */ }
+            else
+#endif
             if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
                 wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
                 copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
@@ -2123,6 +2376,22 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 copy_i32_from_mapped(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, cs);
                 }
             }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+            if (fetch_stream_) {
+                uint8_t* stage = staging_ + (size_t)(grp * kStagingBlobs) * lay.max_blob;
+                if (!branch(fetch_fork_, cs, fetch_stream_, "fork expert fetch")) return false;
+                wait_flag_ge(m_flagB_, ring, fetch_stream_);
+                if (gpu_tasks_ && gpu_tasks_->reuse_slots) {
+                    gpu_tasks_fetch_cached((unsigned long long*)p_ptr2,p_counts+2,gpu_tasks_->reuse_plan,
+                        gpu_tasks_->reuse_entries+(size_t)l*gpu_tasks_->reuse_slots,gpu_tasks_->reuse_clock+l,
+                        gpu_tasks_->reuse_stats,(int64_t)lay.blob_bytes(l),gpu_tasks_->reuse_blocks,fetch_stream_);
+                } else {
+                    fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t)lay.blob_bytes(l), (int)kStagingBlobs, fetch_stream_);
+                    rebase_ptrs((unsigned long long*)p_ptr2, p_counts + 2, stage, (int64_t)lay.blob_bytes(l), fetch_stream_);
+                }
+                if (cudaEventRecord(fetch_join_, fetch_stream_) != cudaSuccess) { err = "record fetch completion failed"; return false; }
+            }
+#endif
             stamp(l, 19, grp);
             grouped(p_ptr, p_start, p_counts, 0, hit_out);
             stamp(l, 20, grp);
@@ -2130,6 +2399,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             else if (m_bal_ != nullptr)   // set_pcie_balance: the PCIe part starts
                 wait_flag_ge_stamped(m_flagB_, ring, m_bal_ + ((l - lb_) * 2 + grp) * 4 + 1, nullptr, cs);
             else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+            if (fetch_stream_) {
+                if (cudaStreamWaitEvent(cs, fetch_join_, 0) != cudaSuccess) {
+                    err = "join expert fetch failed"; return false;
+                }
+            } else
+#endif
             if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
                 const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
                 uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
@@ -2146,14 +2422,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 copy_or_zero_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N,
                                          skip_ + grp, ring, cs);
             } else {
-                const bool fuse_rows = fuse_rows_on() && !prof_on_ && !remote_opt_ && dec_batch && m_bal_ == nullptr;   // 143-amdk
-                if (!fuse_rows) {
+                const bool fuse_rows = !separate_rows_ && fuse_rows_on() && !prof_on_ && !remote_opt_ && dec_batch && m_bal_ == nullptr;   // 143-amdk
+                if (!fuse_rows && !separate_rows_) {
                     if (m_bal_ != nullptr)   // set_pcie_balance: ... and ends as it waits for the CPU's rows
                         wait_flag_ge_stamped(m_flag_, ring, m_bal_ + ((l - lb_) * 2 + grp) * 4 + 2, nullptr, cs);
                     else
                         wait_flag_ge(m_flag_, ring, cs);           // the CPU's share is in the mapped rows
                 }
                 stamp(l, 23, grp);
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+                if (separate_rows_)
+                    remote_copy_ready(parts_out, m_ymiss_ + (size_t) tb * K * N, (int) (n * K), (int) N,
+                                      p_dst, p_counts + 1, m_row_ready_ + (size_t) grp * max_t_ * K, ring, m_flag_, cs);
+                else
+#endif
                 if (remote_opt_)   // #578: the helper's rows come back reduced; skip them as well
                     remote_opt_->copy_rows(parts_out, m_ymiss_ + (size_t) tb * K * N, tb, n, p_dst, p_counts + 1, cs);
                 else if (fuse_rows)   // the wait folded into the copy's blocks
@@ -2165,6 +2447,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 else
                     copy_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
             }
+            // Rows may transfer independently, but inputs must not be reused
+            // before host bookkeeping and PLE staging have also completed.
+            if (separate_rows_) wait_flag_ge(m_flag_, ring, cs);
             // 143-amdk: the add of the GPU's hit rows is done by the combine that follows (one launch fewer)
             hits_in_combine = fuse_hits_on() && !prof_on_ && !remote_opt_ && !sg_gated_[grp] && dec_batch && n > 1 &&
                               native_moe_combine_enabled() && n <= 8 &&
@@ -2882,6 +3167,13 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const bool pre = prelaunched_ == T;
     prelaunched_ = 0;
     if (!pre && pre_launch_ && !pre_launch_(cs_, err)) return false;   // (a prelaunched window's was served with the first stage's)
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    if (!pre && !prepare_gpu_tasks(T, err)) return false;
+    struct TaskDrain {
+        Verifier* self; bool launched = false, done = false;
+        ~TaskDrain() { if (launched && !done) (void)self->release_gpu_waits(5000); }
+    } task_drain{this};
+#endif
     if (!pre) refresh_ar();
     if (!capture(T, err) || !capture_commit(err)) return false;
     const bool chain = chain_overlap();
@@ -2939,6 +3231,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             const char* value = std::getenv("STRATA_VERIFY_ASYNC_LAUNCH");
             return value != nullptr && value[0] == '1';
         }();
+#if !defined(STRATA_GPU_METAL)
+        if (gpu_tasks_) {
+            task_drain.launched = true;
+            if (!gpu_tasks_->helper->launch_gpu_window(T, err)) return false;
+        }
+#endif
         launch_o.emplace(ar_off_ ? exec_nr_[T] : exec_[T], cs_, device_, threaded_launch,
                          [this] { (void) release_gpu_waits(5000); });
         const cudaError_t le = launch_o->status();
@@ -3051,6 +3349,21 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             !adapt_gate_wait((int32_t) l, err)) return false;
         cur_layer_ = want - 1;
         set_plan_slot(grp);
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+        if (gpu_tasks_) {
+            const auto* packet = gpu_tasks_->host + l - lb_;
+            const auto began = Clock::now();
+            while (*(const volatile uint32_t*)&packet->ready != want) {
+                _mm_pause();
+                if (Clock::now() - began > std::chrono::seconds(20)) {
+                    err = "GPU task publication timed out"; return false;
+                }
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (packet->error) { err = "GPU task planner received an invalid expert ID"; return false; }
+            sink_.gpu_task = packet;
+        }
+#endif
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         progress_at("verify window: the CPU experts of layer", l);
         if (remote_opt_) remote_opt_->begin(h_w_ + (size_t) tb * ss.k, tb, n);
@@ -3140,6 +3453,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const cudaError_t se = cudaStreamSynchronize(cs_);
     trace_ev("SYNCED", -1, -1, (int64_t) se);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    if (gpu_tasks_ && !gpu_tasks_->helper->finish_gpu_window((int)lb_, (int)le_, err)) return false;
+    task_drain.done = true;
+#endif
+    sink_.gpu_task = nullptr;
     if (handoff_failed(err)) return false;   // a stale hand-off: nothing of this window is used
     if (ar_on() && h_plan_err_ != nullptr && *(volatile uint32_t*) h_plan_err_ != 0) {   // #871: refresh_ar saw the table whole
         *(volatile uint32_t*) h_plan_err_ = 0;
@@ -3251,6 +3569,8 @@ void Verifier::set_plan_slot(int grp) {
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
     sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
     sink_.staging_cap = per;
+    sink_.row_ready = separate_rows_ ? h_row_ready_ + (size_t) grp * cap : nullptr;
+    sink_.sequence = (uint32_t) (cur_layer_ + 1);
 }
 
 // Flag B only rises: a host function of an earlier layer may run after a later layer already raised it directly.
@@ -3672,14 +3992,20 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
     // #997: every layout of active slots keeps its own graph pair (20-30 MiB each on an L40S), and with an expert cache
     // sized to the reserve the next window graph - a batch layout or a one-request window captured on first use - can
     // find no VRAM left: free the least recently used layouts until it fits (they are captured again when needed)
-    cudaError_t ie = cudaGraphInstantiate(&ex, graph, 0);
+    unsigned long long flags = 0;
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    const char* fetch_priority = std::getenv("STRATA_GPU_FETCH_PRIORITY");
+    if (fetch_stream_ && fetch_priority && std::atoi(fetch_priority) != 0)
+        flags = cudaGraphInstantiateFlagUseNodePriority;
+#endif
+    cudaError_t ie = cudaGraphInstantiate(&ex, graph, flags);
     int freed = 0;
     for (bool evicted = true; ie == cudaErrorMemoryAllocation && evicted;) {
         (void) cudaGetLastError();
         if (!evict_batch_graph(key, evicted, err)) return false;
         if (evicted) {
             ++freed;
-            ie = cudaGraphInstantiate(&ex, graph, 0);
+            ie = cudaGraphInstantiate(&ex, graph, flags);
         }
     }
     if (freed > 0)

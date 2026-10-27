@@ -333,6 +333,7 @@ public:
     /// The GPU plan the pool writes each layer (VRAM hits + the PCIe share of the misses); give it to the
     /// dispatch (`ExpertDispatch::plan`) before the first `run`.
     GpuPlanSink* plan_sink() { return &sink_; }
+    void set_gpu_dispatch(ExpertDispatch* d) { gpu_dispatch_ = d; }
     /// Plan v0.3 P6: split the window into two token groups and pipeline the CPU experts of one with the GPU work
     /// of the other (default on).  Set before the first `run`.
     void set_split(bool on) { split_ = on; }
@@ -473,6 +474,14 @@ private:
     void refresh_ar();
     uint32_t* h_plan_err_ = nullptr; uint32_t* m_plan_err_ = nullptr;   // set by resident_plan on a -1 (all-resident graph)
     const int32_t* h_res_ = nullptr;      ///< the host residency table (VerifyHits::h_res)
+    bool separate_rows_ = false;
+    uint32_t* h_row_ready_ = nullptr;
+    uint32_t* m_row_ready_ = nullptr;
+    struct RemoteStream {
+        std::atomic<int> device{-1};
+        std::atomic<cudaStream_t> stream{nullptr};
+    };
+    RemoteStream remote_streams_[3];
     bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned* qcnt_ = nullptr;             ///< S26 STRATA_QFUSE: the HC read's q8_1 group counters (n_embd / 32)
@@ -608,6 +617,14 @@ private:
     int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // counts | start | dst | tok | ptr (as int32 pairs)
     int64_t plan_i32_ = 0;                                        // int32 words in the plan block
     GpuPlanSink sink_;
+    ExpertDispatch* gpu_dispatch_ = nullptr;
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    struct GpuTaskState;
+    GpuTaskState* gpu_tasks_ = nullptr;
+    bool prepare_gpu_tasks(int T, std::string& err);
+    cudaStream_t fetch_stream_ = nullptr;
+    cudaEvent_t fetch_fork_ = nullptr, fetch_join_ = nullptr;
+#endif
     uint32_t cur_layer_ = 0;
     static void publish_plan(void* ctx);
     void set_plan_slot(int grp);

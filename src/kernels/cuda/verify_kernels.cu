@@ -716,7 +716,14 @@ __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
     if (cap <= 0) return;
     if (blob_bytes % 16 != 0) { std::fprintf(stderr, "fetch_blobs: blob size must be a multiple of 16\n"); std::exit(1); }
-    fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16));
+    // Opt-in concurrency experiment: enough PCIe requests without occupying
+    // every SM while the resident expert branch is ready to compute.
+    static const int blocks = [] {
+        const char* value = std::getenv("STRATA_GPU_FETCH_BLOCKS");
+        const int requested = value ? std::atoi(value) : 0;
+        return requested > 0 ? std::max(16, std::min(384, requested)) : 384;
+    }();
+    fetch_blobs_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16));
     check("fetch_blobs");
 }
 

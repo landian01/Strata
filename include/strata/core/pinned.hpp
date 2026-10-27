@@ -90,6 +90,9 @@ struct PinnedArena {
     std::vector<uint64_t> slice_starts;
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
+    // Opt-in CUDA host VMM: only this GPU maps the weights. CPU access and H2D copies remain available.
+    int vmm_device = -1;
+    std::vector<std::pair<uint64_t, uint64_t>> vmm_chunks;
     ~PinnedArena();
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;

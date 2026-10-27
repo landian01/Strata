@@ -364,7 +364,9 @@ private:
 /// Plan v0.3 P6: what the GPU computes in a verify window's layer, written by the pool (mapped host memory) right
 /// after the ring and published before the CPU starts its own share.  Groups of entries that share a blob; the
 /// blob is a VRAM slot or a pinned host blob read over PCIe.
+struct GpuTaskPacket;
 struct GpuPlanSink {
+    const GpuTaskPacket* gpu_task = nullptr; // opt-in: the primary GPU has already classified and grouped this layer
     int32_t* counts = nullptr;             ///< [0] groups, [1] entries
     int32_t* start = nullptr;              ///< cap + 1
     int32_t* dst = nullptr;                ///< cap: the entry's row of parts (token * k + j)
@@ -387,6 +389,9 @@ struct GpuPlanSink {
     /// holds the arena's device alias.
     int pcie_mode = 0;
     int32_t cpu_jobs = 0;   ///< host only: the distinct experts the pool computes for the layer just published
+    uint32_t* row_ready = nullptr; // opt-in: each producer publishes its own result rows
+    uint32_t sequence = 0;
+    void (*track_remote)(void* ctx, int device, void* stream) = nullptr;
 };
 
 /// Verifier::set_pcie_balance: a verify window's costs, fitted to each layer's measured times (ms, least squares with
@@ -604,6 +609,11 @@ struct ExpertDispatch {
     int pcie_num = 0;
     PcieModel pcie_model;          ///< Verifier::set_pcie_balance: the PCIe count from measured costs
     int64_t pcie_experts = 0;      ///< distinct experts the GPU read over PCIe in verify windows
+    // Indexed: primary hit, helper hit, primary miss, helper miss, CPU miss, skipped.
+    struct CacheMeasure { uint64_t groups[6]{}, entries[6]{}, bytes[6]{}; };
+    CacheMeasure cache_measure[64]{};
+    uint64_t helper_weight_bytes = 0;
+    uint64_t pcie_weight_bytes = 0; ///< full expert blobs requested, excluding adaptive cache uploads
     /// #588: routed (token, expert) entries the GPU computed from outside its cache in verify windows: read over PCIe
     /// (--pcie-frac, kind 1) or on another GPU (kind 2).  In neither cache_hits nor cache_refused.
     int64_t offload_entries = 0;
@@ -1305,6 +1315,7 @@ private:
     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;
     std::vector<const uint8_t*> dev_slice_;   ///< device alias of each registered slice (or of the whole range)
+    int vmm_device_ = -1;                    ///< VMM aliases belong only to this GPU; -1 is the ordinary path
     uint64_t slice_bytes_ = 0;
     const uint8_t* base_ = nullptr;
     int64_t blobs_ = 0;

@@ -4,6 +4,7 @@
 #include "strata/core/on_device.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/core/remote_experts.hpp"
+#include "strata/core/gpu_tasks.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/artifact/gguf_reader.hpp"
@@ -4811,6 +4812,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     };
     const auto c0 = std::chrono::steady_clock::now();
     const FileExpertSource::DecodeScope decode_scope;   // 149 STRATA_IO_PF_GATE: this thread reads for the decode
+    const bool tail_sample = d.pool->tail_begin(d.layers, n_tok);
+    double tail_begin_ms = 0, tail_wait_ms = 0;
+    if (tail_sample) for (int r = 0; r < d.remote_count; ++r) {
+        tail_begin_ms += d.remote[r]->ms_begin();
+        tail_wait_ms += d.remote[r]->ms_wait();
+    }
     // 149-cold STRATA_COLD_OVERLAP: 0 off, 1 overlap, 2 measure only, 3 overlap + zero-copy, 4 zero-copy only.
     // 0.2.0: unset, 4 for the GGUF read in place on Linux (zero-copy needs the page cache's residency query), else 0
     static const int cold_env = [] {
@@ -4821,21 +4828,101 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     pt("begin");
     d.src->begin_layer(d.layers, ids, n_tok * k);
     pt("begun");
-    if (!d.usage.empty())
-        for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+    if (!d.usage.empty()) {
+        static const bool distinct_bytes = [] {
+            const char* v = std::getenv("STRATA_ADAPT_DISTINCT_BYTES"); return v && std::atoi(v) != 0;
+        }();
+        if (distinct_bytes && d.n_expert > 1024) { d.failed=true; d.fail="distinct-byte adaptation supports at most 1024 experts/layer"; return; }
+        uint64_t seen[16] = {};
+        for (int64_t i = 0; i < n_tok * k; ++i) {
+            const int e=ids[i];
+            if (e < 0 || e >= d.n_expert) continue;
+            if (distinct_bytes) {
+                const uint64_t bit=uint64_t(1)<<(e&63);
+                if (seen[e>>6]&bit) continue;
+                seen[e>>6]|=bit;
+            }
+            d.usage[(size_t)d.layers*d.n_expert+e]+=1.0f;
+        }
+    }
     // ---- plan v0.3 P6: the GPU's share, decided and published FIRST so the GPU starts while the CPU works.
     // Distinct experts in routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
     const int64_t n = n_tok * k;
+    static const bool unified_env = [] { const char* v = std::getenv("STRATA_REMOTE_UNIFIED_PLAN"); return v && std::atoi(v) != 0; }();
+    const bool unified = unified_env && d.remote_count == 1 && d.peer == nullptr && native &&
+                         d.plan && n <= d.plan->cap && n <= kMaxWindowEntries;
+    RemoteExperts::RoutePlan remote_plan;
     int32_t kind[kMaxWindowEntries];       // per entry: -1 CPU, 0 VRAM, 1 PCIe
-    if (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap) {
+    const GpuTaskPacket* gpu_task = d.plan ? d.plan->gpu_task : nullptr;
+    if (gpu_task) {
+        // The verifier waited for the GPU release before invoking the pool.
+        if (gpu_task->error) { d.failed = true; d.fail = "GPU task planner rejected routed expert IDs"; return; }
+        static const bool verify_remote_map = [] {
+            const char* v = std::getenv("STRATA_REMOTE_CACHE_VERIFY"); return v && std::atoi(v) != 0;
+        }();
+        if (verify_remote_map) {
+            static const bool joint_schedule = [] {
+                const char* v=std::getenv("STRATA_SCHED_THREEWAY");return v&&std::atoi(v)!=0;
+            }();
+            int reuse_entries = 0;
+            bool valid = d.remote_count == 1 && gpu_task->remote.count >= 0 && gpu_task->remote.count <= n;
+            for (int i = 0; valid && i < n; ++i) {
+                const int e = ids[i];
+                const bool primary = d.host_res[(size_t)d.layers*d.n_expert+e] >= 0;
+                const bool remote = !primary && d.remote[0]->holds(d.layers,e);
+                const int kind=gpu_task->kind[i];
+                reuse_entries += kind == 0 && !primary;
+                valid = (!primary || kind == 0) && kind>=-2 && kind<=3 &&
+                    (joint_schedule ? (kind!=2 || remote) && (!remote || kind==2 || kind==-1 || kind==1)
+                                    : (kind==2)==remote);
+                if (kind == 0 && !primary) valid = valid && !remote;
+            }
+            valid = valid && reuse_entries == gpu_task->reuse_entries;
+            for (int g = 0; valid && g < gpu_task->cold.count; ++g) {
+                const int start=gpu_task->cold.start[g], end=gpu_task->cold.start[g+1];
+                if (start<0 || end<=start || end>n) {valid=false;break;}
+                for(int j=start;valid && j<end;++j) {
+                    const int row=gpu_task->transfer.row[gpu_task->cold.dst[j]];
+                    valid=row>=0 && row<n && gpu_task->kind[row]==3 &&
+                        gpu_task->cold.ptr[g]==d.remote[0]->cold_address(d.layers,ids[row]);
+                }
+            }
+            for (int g = 0; valid && g < gpu_task->remote.count; ++g) {
+                const int start = gpu_task->remote.start[g], end = gpu_task->remote.start[g+1];
+                if (start < 0 || end <= start || end > n) { valid = false; break; }
+                for (int j = start; valid && j < end; ++j) {
+                    const int row = gpu_task->transfer.row[j];
+                    valid = row >= 0 && row < n && gpu_task->kind[row] == 2 &&
+                        gpu_task->remote.ptr[g] == d.remote[0]->cached_address(d.layers,ids[row]);
+                }
+            }
+            if (!valid) { d.failed = true; d.fail = "GPU helper task ownership/address mismatch after cache refill"; return; }
+            static std::atomic<uint64_t> checked{0};
+            const uint64_t count = checked.fetch_add(1) + 1;
+            if (count == 1 || count % 8192 == 0)
+                std::fprintf(stderr,"strata helper map verify: %llu layer task tables checked\n",(unsigned long long)count);
+        }
+        std::copy(gpu_task->kind, gpu_task->kind + n, kind);
+        d.tail_experts += gpu_task->skipped;
+        d.pcie_experts += gpu_task->pcie_groups;
+        d.pcie_weight_bytes += (uint64_t)gpu_task->pcie_groups * lay.blob_bytes(d.layers);
+        d.helper_weight_bytes += (uint64_t)gpu_task->cold.count * lay.blob_bytes(d.layers);
+        for (int j = 0; j < gpu_task->cpu_groups; ++j) d.jobs_multi[j].nt = 0;
+    } else if (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap) {
         int64_t distinct[kMaxWindowEntries], first_of[kMaxWindowEntries];
         int nd = 0, nmiss = 0;
         // a helper GPU (RemoteExperts) holding the expert computes it in its own VRAM once begin() claims the row: like
         // the peer tier's, such an expert is no miss of this plan and never part of the PCIe share, which would read it
         // over the primary's link instead (2x RX 6900 XT, IQ3_S, --remote-expert-opt with the probed share 0.39: ~4
         // helper experts per layer-window moved to PCIe, 59 ms per window against 34 ms)
-        auto helper_holds = [&](int32_t e) {
+        int32_t helper_slots[kMaxWindowEntries];
+        if (unified) std::fill(helper_slots, helper_slots + n, -2);
+        auto helper_holds = [&](int64_t i) {
+            const int32_t e = ids[i];
+            if (unified) {
+                if (helper_slots[i] == -2) helper_slots[i] = d.remote[0]->cache_slot(d.layers,e);
+                return helper_slots[i] >= 0;
+            }
             for (int r = 0; r < d.remote_count; ++r)
                 if (d.remote[r]->holds(d.layers, e)) return true;
             return false;
@@ -4848,7 +4935,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 distinct[nd++] = i;
                 const int32_t e = ids[i];
                 if (e >= 0 && e < d.n_expert && d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0 &&
-                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(e)) ++nmiss;
+                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(i)) ++nmiss;
             }
         }
         // STRATA_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
@@ -4857,7 +4944,11 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         const int tail_rank = tail_skip_rank();
         bool skip_d[kMaxWindowEntries];
         for (int q = 0; q < nd; ++q) skip_d[q] = false;
-        if (tail_rank > 0 && d.peer == nullptr && d.remote_count == 0) {
+        static const bool multi_tail = [] {
+            const char* v = std::getenv("STRATA_MULTIGPU_TAIL_SKIP");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        if (tail_rank > 0 && ((d.peer == nullptr && d.remote_count == 0) || multi_tail)) {
             int minr[kMaxWindowEntries];
             for (int q = 0; q < nd; ++q) minr[q] = 99;
             for (int64_t i = 0; i < n; ++i) {
@@ -4869,6 +4960,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 const int32_t e = ids[distinct[q]];
                 if (e < 0 || e >= d.n_expert || minr[q] < tail_rank) continue;
                 if (d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0) continue;   // resident
+                // The same rule as one GPU: only a miss of every GPU can be
+                // skipped. A peer/helper resident expert still contributes.
+                if ((d.peer != nullptr && d.peer->has(d.layers, e)) || helper_holds(distinct[q])) continue;
                 skip_d[q] = true;
                 --nmiss;
                 ++d.tail_experts;
@@ -4884,8 +4978,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (pcie_min1 && pcie_ok && m < 1 && nmiss >= 2) m = 1;
         int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
         GpuPlanSink& P = *d.plan;
-        const uint8_t* dma_src[64];
-        int64_t pcie_i0[64];
+        const uint8_t* dma_src[kMaxWindowEntries];
+        int64_t pcie_i0[kMaxWindowEntries];
         for (int q = 0; q < nd; ++q) {
             const int64_t i0 = distinct[q];
             const int32_t e = ids[i0];
@@ -4904,13 +4998,22 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                                                                                  : (size_t) slot * (size_t) d.cache_blob));
                 } else if (d.peer != nullptr && d.peer->has(d.layers, e)) {
                     kd = 2;                        // multi-GPU: the second GPU computes it
-                } else if (helper_holds(e)) {
-                    // left to the helper: kind -1 until RemoteExperts::begin() claims the row (see above)
+                } else if (helper_holds(i0)) {
+                    // Preserve the primary plan's group order for the helper;
+                    // begin() only patches addresses and submits this descriptor.
+                    if (unified) {
+                        const int g = remote_plan.groups++;
+                        remote_plan.expert[g] = e; remote_plan.slot[g] = helper_slots[i0];
+                        remote_plan.start[g] = remote_plan.entries;
+                        for (int64_t i = i0; i < n; ++i) if (first_of[i] == i0)
+                            remote_plan.row[remote_plan.entries++] = (int32_t)i;
+                        remote_plan.start[g+1] = remote_plan.entries;
+                    }
                 } else if (d.fs != nullptr && d.fs->take(d.layers, e, ptr)) {
                     kd = 0;                        // Foresight: a landed swap-space slot holds it - a GPU group like a hit
                 } else {
                     if (d.fs != nullptr) d.fs->note_miss(d.src, d.layers, e);
-                    if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
+                    if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < kMaxWindowEntries) {
                         const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
                             kd = 1;
@@ -4949,6 +5052,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     ++entries;
                 }
             ++d.pcie_experts;
+            d.pcie_weight_bytes += bb;
         }
         P.start2[fetches] = entries;
         P.counts[0] = groups;
@@ -4977,10 +5081,46 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             return;
         }
     }
-    if (d.remote_count > 0) {
+    static const bool cpu_publish = [] { const char* v = std::getenv("STRATA_CPU_EXPERT_PUBLISH"); return v && std::atoi(v) != 0; }();
+    static const bool overlap_remote = [] {
+        const char* v = std::getenv("STRATA_REMOTE_CPU_OVERLAP");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    // One static helper tier, warm native CPU work only. Ownership stays fixed
+    // for the whole layer; cold batches, peer direct writes and reduced remote
+    // outputs retain their existing ordering.
+    static const bool cache_stats = [] { const char* v=std::getenv("STRATA_EXPERT_CACHE_STATS");return v && std::atoi(v)!=0; }();
+    if (cache_stats && d.layers>=0 && d.layers<64) {
+        auto& s=d.cache_measure[d.layers];
+        for(int i=0;i<n;++i) {
+            const int c=kind[i]==0?0:kind[i]==2?1:kind[i]==1?2:kind[i]==3?3:kind[i]==-2?5:4;
+            ++s.entries[c]; bool first=true;
+            for(int j=0;j<i;++j) if(ids[j]==ids[i]) {first=false;break;}
+            if(first) {++s.groups[c];s.bytes[c]+=lay.blob_bytes(d.layers);}
+        }
+    }
+    const bool overlap = !gpu_task && overlap_remote && native && d.remote_count == 1 && d.peer == nullptr &&
+                         d.cold_mode == 0 && d.pool->workers() > 0 && !d.remote[0]->optimized_decode();
+    int32_t before_remote[kMaxWindowEntries];
+    if (overlap) {
+        std::copy(kind, kind + n, before_remote);
+        if (unified) {
+            for (int j = 0; j < remote_plan.entries; ++j) kind[remote_plan.row[j]] = 2;
+        } else for (int64_t i = 0; i < n; ++i) {
+            const int32_t e = ids[i];
+            if (kind[i] == -1 && e >= 0 && e < d.n_expert &&
+                (!d.host_res || d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0) &&
+                d.remote[0]->holds(d.layers, e)) kind[i] = 2;
+        }
+    } else if (!gpu_task && d.remote_count > 0) {
         static thread_local std::string remote_error;
         for (int r = 0; r < d.remote_count; ++r) {
-            if (!d.remote[r]->begin(d.layers, x_f, ids, n_tok, k, kind, d.host_res, remote_error)) {
+            // Register before submission: even a partially failed begin() may
+            // have queued writes into the verifier's shared buffers.
+            if (d.plan && d.plan->row_ready && d.plan->track_remote)
+                d.plan->track_remote(d.plan->ctx, d.remote[r]->device(), d.remote[r]->stream_handle());
+            if (!d.remote[r]->begin(d.layers, x_f, ids, n_tok, k, kind, d.host_res, remote_error, out,
+                                    d.plan ? d.plan->row_ready : nullptr, d.plan ? d.plan->sequence : 0, unified ? &remote_plan : nullptr)) {
                 d.failed = true; d.fail = remote_error.c_str(); d.fail_layer = d.layers; return;
             }
             for (int64_t i = 0; i < n; ++i) if (d.remote[r]->owns(i)) kind[i] = 2;
@@ -5002,6 +5142,11 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (!published) ++d.stale_x;
     }
     const auto c1 = std::chrono::steady_clock::now();
+    if (tail_sample) {
+        double remote_ms = 0;
+        for (int r = 0; r < d.remote_count; ++r) remote_ms += d.remote[r]->ms_begin();
+        d.pool->tail_mark("plan", (int64_t) ((remote_ms - tail_begin_ms) * 1000000));
+    }
     if (any_cpu) {
         // #578 --remote-expert-opt: a token whose experts all run on a GPU (CUDA0 or a helper) needs no CPU activation
         const bool ep = d.remote_count > 0 && d.remote[0]->optimized_decode();
@@ -5016,6 +5161,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
     }
     const auto c2 = std::chrono::steady_clock::now();
+    if (tail_sample) d.pool->tail_mark("actq");
     // 149-cold STRATA_COLD_OVERLAP (d.cold_mode): which of the CPU's experts still have a blob to read.  Mode 1 reads
     // them in the background and computes the ready ones first, then each read one as it lands; every expert keeps
     // its own token rows (the pool splits rows, never a row's sum), and the weighted sum over a token's experts is
@@ -5027,7 +5173,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     int64_t npend = 0;
     double cold_r_ms = 0;
     if (any_cpu) {   // CS-T: the experts the CPU computes, fetched together (the GGUF in place reads them on several threads)
-        for (int64_t i = 0; i < n_tok * k; ++i)
+        if (gpu_task) miss.assign(gpu_task->cpu_expert, gpu_task->cpu_expert + gpu_task->cpu_groups);
+        else for (int64_t i = 0; i < n_tok * k; ++i)
             if (kind[i] == -1 && ids[i] >= 0 && ids[i] < d.n_expert &&
                 std::find(miss.begin(), miss.end(), (int64_t) ids[i]) == miss.end())
                 miss.push_back(ids[i]);
@@ -5085,13 +5232,17 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 // multi-GPU: a direct peer launch is writing this row right now - zeroing it would race it;
                 // dec_batch: copy_rows_from_mapped_kernel already zeroes kind 0/1 rows on the GPU
                 if (!((kind[i] == 2 && d.peer != nullptr && d.peer->launched_direct()) ||
-                      (gpu_zeroes_hits && (kind[i] == 0 || kind[i] == 1))))
+                      ((kind[i] == 2 || kind[i] == 3) && gpu_task) ||
+                      (kind[i] == 2 && !overlap && d.remote_count > 0 &&
+                     std::any_of(d.remote, d.remote + d.remote_count, [](RemoteExperts* r) { return r->direct_output(); })) ||
+                    (gpu_zeroes_hits && (kind[i] == 0 || kind[i] == 1))))
                     std::memset(row, 0, (size_t) H * sizeof(float));
                 continue;
             }
             ++d.cache_refused;
             int16_t& jo = d.job_of[(size_t) e];
-            if (jo < 0) {
+            if (gpu_task) jo = (int16_t)gpu_task->cpu_group[i];
+            if (jo < 0 || (gpu_task && d.jobs_multi[(size_t)jo].nt == 0)) {
                 const uint8_t* zp[3] = {nullptr, nullptr, nullptr};
                 const bool zc = d.cold_mode >= 3 && native && d.src->zc_roles(d.layers, e, zp);
                 const uint8_t* b = zc ? zp[0] : d.src->blob(d.layers, e);
@@ -5103,11 +5254,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     ++d.missing;
                     return;
                 }
-                jo = (int16_t) njobs++;
+                if (!gpu_task) jo = (int16_t) njobs;
+                ++njobs;
                 ExpertJobMulti& nj = d.jobs_multi[(size_t) jo];
                 nj.blob = b;
                 nj.nt = 0;
                 nj.fmt = nullptr;
+                nj.ready_sequence = cpu_publish && d.plan && d.plan->row_ready ? d.plan->sequence : 0;
                 if (zc) {   // 149-cold mode 3: the gate rows are the blob; up and down at their distance in the mapping
                     if (d.zc_fmt.size() < d.jobs_multi.size()) d.zc_fmt.resize(d.jobs_multi.size());
                     strata::kernels::cpu::NativeFmt& f = d.zc_fmt[(size_t) jo];
@@ -5122,6 +5275,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             jb.act[jb.nt] = &d.act_multi[(size_t) t];
             jb.nact[jb.nt] = native ? d.nact_multi.data() + (size_t) t * kNativeActBytes : nullptr;
             jb.out[jb.nt] = row;
+            jb.row_ready[jb.nt] = cpu_publish && d.plan && d.plan->row_ready ? d.plan->row_ready + i : nullptr;
             ++jb.nt;
             ++d.multi_entries;
         }
@@ -5172,13 +5326,100 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         d.ms_jobs -= run_ms_extra;
     }
     const auto c3 = std::chrono::steady_clock::now();
+    if (tail_sample) {
+        int cpu_entries = 0;
+        for (int j = 0; j < njobs; ++j) cpu_entries += d.jobs_multi[(size_t) j].nt;
+        d.pool->tail_mark("jobs", njobs, cpu_entries);
+        if (gpu_task) {
+            d.pool->tail_mark("routes", gpu_task->pcie_groups, gpu_task->cold.count);
+            d.pool->tail_mark("reuse", gpu_task->reuse_groups, gpu_task->reuse_entries);
+            d.pool->tail_mark("predict_gpu", (int64_t)(gpu_task->predicted_us[0]*1000),
+                              (int64_t)(gpu_task->predicted_us[1]*1000));
+            d.pool->tail_mark("predict_cpu", (int64_t)(gpu_task->predicted_us[2]*1000), 0);
+        }
+    }
     if (d.plan != nullptr) d.plan->cpu_jobs = njobs;
     pt("run", njobs);
-    if (njobs > 0 && npend == 0) {
+    if (overlap) {
+        static thread_local std::string remote_error;
+        struct Submit {
+            ExpertDispatch& d;
+            const float* x;
+            float* out;
+            const int32_t *ids, *before, *claimed;
+            int64_t nt, k;
+            std::string& error;
+            const RemoteExperts::RoutePlan* plan;
+            bool ok = false;
+        } submit{d, x_f, out, ids, before_remote, kind, n_tok, k, remote_error, unified ? &remote_plan : nullptr};
+        auto launch = [](void* p) {
+            auto& s = *static_cast<Submit*>(p);
+            // The pool must always finish its published batch, even on a
+            // submission failure. Report that failure after joining workers.
+            try {
+                if (s.d.plan && s.d.plan->row_ready && s.d.plan->track_remote)
+                    s.d.plan->track_remote(s.d.plan->ctx, s.d.remote[0]->device(), s.d.remote[0]->stream_handle());
+                s.ok = s.d.remote[0]->begin(s.d.layers, s.x, s.ids, s.nt, s.k,
+                                           s.before, s.d.host_res, s.error, s.out,
+                                            s.d.plan ? s.d.plan->row_ready : nullptr, s.d.plan ? s.d.plan->sequence : 0, s.plan);
+                if (s.ok) for (int64_t i = 0; i < s.nt * s.k; ++i) {
+                    if (s.d.remote[0]->owns(i) != (s.claimed[i] == 2)) {
+                        s.ok = false;
+                        s.error = "remote ownership changed after CPU publication";
+                        break;
+                    }
+                }
+            } catch (...) {
+                s.ok = false;
+                s.error = "remote submission threw after CPU publication";
+            }
+        };
+        // All output-row clearing and job construction are complete. The
+        // workers compute gate/up while this host builds and submits the helper
+        // graph, then the host participates in the remaining CPU tasks.
+        d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, launch, &submit);
+        if (!submit.ok) {
+            d.failed = true; d.fail = remote_error.c_str(); d.fail_layer = d.layers; return;
+        }
+        static const bool verify_overlap = std::getenv("STRATA_REMOTE_OVERLAP_VERIFY") != nullptr;
+        static thread_local uint64_t calls = 0, checks = 0;
+        if (verify_overlap && ++calls % 97 == 1 && njobs > 0) {
+            // Diagnostic-only real-route parity: re-run identical CPU jobs
+            // without the submission hook and compare every CPU output row.
+            static thread_local std::vector<float> reference;
+              reference.resize((size_t) n * H);
+              // Separate-ready helpers may still be writing their rows. Only
+              // CPU-owned rows belong to this diagnostic's snapshot.
+              for (int64_t i = 0; i < n; ++i) if (kind[i] == -1)
+                  std::memcpy(reference.data() + (size_t) i * H, out + (size_t) i * H,
+                              H * sizeof(float));
+            std::vector<ExpertJobMulti> reference_jobs(d.jobs_multi.begin(), d.jobs_multi.begin() + njobs);
+            std::vector<float> checked((size_t)n * H);
+            for (auto& job : reference_jobs) {
+                job.ready_sequence = 0;
+                for (int t = 0; t < job.nt; ++t) {
+                    const size_t offset = (size_t)(job.out[t] - out);
+                    job.out[t] = checked.data() + offset;
+                    job.row_ready[t] = nullptr;
+                }
+            }
+            d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], reference_jobs.data(), njobs);
+            for (int64_t i = 0; i < n; ++i) if (kind[i] == -1 &&
+                std::memcmp(reference.data() + (size_t) i * H, checked.data() + (size_t) i * H, H * sizeof(float)) != 0) {
+                d.failed = true; d.fail = "overlapped CPU rows differ bitwise from the serial reference";
+                d.fail_layer = d.layers; d.fail_expert = ids[i]; return;
+            }
+            ++checks;
+            if (checks == 1 || checks % 64 == 0)
+                std::fprintf(stderr, "strata overlap parity: %llu CPU layer checks passed, %llu ownership checks passed\n",
+                             (unsigned long long) checks, (unsigned long long) calls);
+        }
+    } else if (njobs > 0 && npend == 0) {
         if (native) d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs);
         else d.pool->run_split_multi(d.jobs_multi.data(), njobs);
     }
-    if (d.remote_count > 0) {
+    if (tail_sample) d.pool->tail_mark("cpu_done");
+    if (!gpu_task && d.remote_count > 0) {
         static thread_local std::string remote_error;
         for (int r = 0; r < d.remote_count; ++r)
             if (!d.remote[r]->finish(out, remote_error)) {
@@ -5196,6 +5437,11 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
     }
     const auto c4 = std::chrono::steady_clock::now();
+    if (tail_sample) {
+        double remote_ms = 0;
+        for (int r = 0; r < d.remote_count; ++r) remote_ms += d.remote[r]->ms_wait();
+        d.pool->tail_mark("finish", (int64_t) ((remote_ms - tail_wait_ms) * 1000000));
+    }
     pt("ran");
     auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     d.ms_plan += ms(c0, c1);
@@ -5209,6 +5455,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     d.multi_misses += njobs;
     ++d.layers;
     d.experts += n_tok * k;
+    if (d.plan && d.plan->row_ready) {
+        // Each producer publishes only its own rows after its data is visible.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        for (int64_t i = 0; i < n; ++i) if (kind[i] != 2 && kind[i] != 3)
+            ((volatile uint32_t*) d.plan->row_ready)[i] = d.plan->sequence;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
 }
 
 void expert_hit_run(void* user, void* stream, HitPhase phase, const int32_t* ids, int64_t k) {
@@ -5681,6 +5934,18 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
                              std::string& err, uint64_t max_pinned_bytes,
                              const std::string& shared_arena_file) {
     close();
+    vmm_device_ = -1;
+    const char* vmm_env = std::getenv("STRATA_ARENA_VMM");
+    const bool vmm = vmm_env && std::string(vmm_env) == "1";
+    const auto arena_option_on = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && *value && *value != '0';
+    };
+    if (vmm && (pin_by_need_ || !shared_arena_file.empty() || max_pinned_bytes || arena_pin_cap_gib() != 0 ||
+                arena_option_on("STRATA_ARENA_MMAP") || arena_option_on("STRATA_DEFERRED_REGISTER"))) {
+        err = "STRATA_ARENA_VMM requires full pinning (STRATA_ARENA_PIN_GIB=0), without pin-by-need, mmap, shared or deferred arena";
+        return false;
+    }
     const std::string path = pack_dir + "/experts.bin";
     // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
@@ -5960,7 +6225,11 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     slice_bytes_ = a->slice_bytes;
     pin_start_.clear(); pin_end_.clear(); pin_dev_.clear(); layer_pcie_.clear();
     ranges_ = false;
-    if (a->by_need) {
+    vmm_device_ = a->vmm_device;
+    if (vmm_device_ >= 0) {
+        // Host VMM already has the GPU virtual address; cudaHostGetDevicePointer is for registered allocations.
+        dev_slice_.push_back(base_);
+    } else if (a->by_need) {
         // device alias of each registered range's start (device_alias adds the blob's distance from it); one
         // refusal drops the whole table: no PCIe share rather than a wrong pointer
         ranges_ = true;
@@ -6084,6 +6353,10 @@ bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {
 }
 
 const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) const {
+    if (vmm_device_ >= 0) {
+        int device = -1;
+        if (cudaGetDevice(&device) != cudaSuccess || device != vmm_device_) return nullptr;
+    }
     if (ranges_) {   // pin by need: the range's device base + the blob's offset inside it
         if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return nullptr;
         const auto& rl = strata::kernels::cpu::expert_layout();

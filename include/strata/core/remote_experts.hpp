@@ -14,11 +14,21 @@
 
 namespace strata::core {
 class RemoteExpertOpt;
+struct RemoteGraphCache;
+struct GpuTaskPacket;
 
-/// A static, profile-filled expert tier on another CUDA device. CUDA0 keeps all
+/// A profile-filled expert tier on another CUDA device, optionally refreshed
+/// between drained decode windows. CUDA0 keeps all
 /// dense weights and state; results return through the existing pinned CPU rows.
 class RemoteExperts {
 public:
+    // A layer's stable, first-seen expert order, built by the primary planner.
+    // Copied into pinned graph metadata before begin() returns.
+    struct RoutePlan {
+        int groups = 0, entries = 0;
+        int32_t expert[80], slot[80], start[81], row[80];
+        RoutePlan() { start[0] = 0; }
+    };
     RemoteExperts() = default;
     ~RemoteExperts();
     RemoteExperts(const RemoteExperts&) = delete;
@@ -32,16 +42,41 @@ public:
               const ExpertCache& primary, ExpertSource& source,
               std::vector<uint8_t>& claimed, std::string& err, bool auto_size = false);
     void close();
+    /// Opt-in cache maintenance at a drained verify/primary-adaptation boundary.
+    /// Never replaces a slot referenced by a running helper graph. Incoming
+    /// experts exclude both primary residency and pending primary promotions.
+    bool rebalance_cache(const std::vector<float>& usage, const std::vector<int32_t>& primary,
+                         const std::vector<std::pair<int32_t,int32_t>>& pending, int max_swaps,
+                         ExpertSource& source, std::string& err);
+    uint64_t cache_upload_bytes() const { return cache_upload_bytes_; }
 
     /// `kind` is the primary verifier's classification (-1 = CPU candidate),
     /// or null on the one-token path. Entries already served on CUDA0 are excluded.
     bool begin(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok,
                int64_t k, const int32_t* kind, const int32_t* primary_res,
-               std::string& err);
+               std::string& err, float* out = nullptr, uint32_t* ready = nullptr, uint32_t sequence = 0, const RoutePlan* plan = nullptr);
     bool owns(int64_t index) const { return owned_[(size_t) index] != 0; }
     /// This helper's cache holds (layer, expert): begin() will take its rows unless the plan gave them away.
     bool holds(int64_t layer, int32_t expert) const { return cache_.slot_of(layer, expert) >= 0; }
+    int cache_slot(int64_t layer, int32_t expert) const { return cache_.slot_of(layer, expert); }
+    uint64_t cached_address(int64_t layer, int32_t expert) const {
+        const int slot = cache_.slot_of(layer, expert);
+        return slot < 0 ? 0 : (uint64_t) cache_.device_slot(slot);
+    }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    bool prepare_gpu_window(GpuTaskPacket*, int lb, int le, int nt, const float* x, float* out,
+                            uint32_t* ready, uint32_t* abort_flag, std::string& err);
+    bool launch_gpu_window(int nt, std::string& err);
+    bool finish_gpu_window(int lb, int le, std::string& err);
+#endif
+    uint64_t cold_address(int64_t layer, int32_t expert) const {
+        const size_t i=(size_t)layer*n_expert_+expert;
+        return i<cold_map_.size()?cold_map_[i]:0;
+    }
     bool optimized_decode() const { return remote_opt_ != nullptr; }
+    bool direct_output() const { return direct_active_; }
+    int device() const { return device_; }
+    void* stream_handle() const { return (void*) stream_; }
     bool finish(float* out, std::string& err);
     int64_t resident() const { return cache_.resident(); }
     int64_t computed() const { return computed_; }
@@ -63,16 +98,42 @@ public:
                            uint8_t* hit, std::string& err);
 
 private:
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    cudaGraphExec_t task_exec_[9] = {};
+    GpuTaskPacket* task_packets_ = nullptr;
+    uint64_t task_launches_ = 0;
+    cudaStream_t cold_stream_ = nullptr;
+    cudaEvent_t cold_fork_ = nullptr;
+    std::vector<cudaEvent_t> cold_done_;
+    void* cold_meta_ = nullptr;
+    uint8_t* cold_weights_ = nullptr;
+    unsigned long long* cold_source_ = nullptr;
+    int32_t* cold_counts_ = nullptr;
+    size_t cold_stride_ = 0;
+    int cold_cap_ = 0;
+#endif
+    bool enqueue(int64_t layer, int64_t n_tok, int64_t cap_groups, int64_t cap_entries, std::string& err,
+                 bool direct_output = false);
+    bool copy_output(int64_t cap_entries, std::string& err);
+    bool copy_input(int64_t n_tok, std::string& err);
     friend class RemoteExpertOpt;
     RemoteExpertOpt* remote_opt_ = nullptr;
     int device_ = -1;
     int64_t n_expert_ = 0;
     int32_t groups_ = 0;
     int64_t computed_ = 0;
+    uint64_t cache_upload_bytes_ = 0, cache_swap_count_ = 0, cache_rebalances_ = 0;
     int64_t launched_layers_ = 0;
     uint64_t returned_bytes_ = 0;
     uint64_t full_row_bytes_ = 0;
     double ms_begin_ = 0, ms_wait_ = 0;
+    void* keepalive_ = nullptr;  // optional request-triggered CUDA clock keepalive
+    RemoteGraphCache* graphs_ = nullptr;
+    bool group_buffer_ = false, group_verify_ = false;
+    uint32_t group_epoch_ = 0;
+    uint64_t group_checks_ = 0;
+    std::vector<uint32_t> expert_epoch_;
+    std::vector<int32_t> expert_group_, group_size_, group_cursor_;
     ExpertCache cache_;
     cudaStream_t stream_ = nullptr;
     cudaStream_t read_stream_ = nullptr;   ///< STRATA_PREFILL_HELPER_SOURCE: cache -> host copies
@@ -80,10 +141,22 @@ private:
     float* h_x_ = nullptr;
     float* h_out_ = nullptr;
     void* h_meta_ = nullptr;
+    void* h_meta_base_ = nullptr;
+    size_t meta_stride_ = 0;
+    int meta_slot_ = 0;
+    bool separate_ready_ = false, async_active_ = false;
     float* d_x_ = nullptr;
     float* z_x_ = nullptr;     ///< h_x_ as the helper GPU sees it (zero-copy: no input copy per layer)
     float* z_out_ = nullptr;   ///< h_out_ as the helper GPU sees it (zero-copy: no result copy)
     bool zero_copy_ = false;
+    bool output_kernel_ = false, output_verify_ = false;
+    bool direct_io_ = false, direct_input_ = false, direct_active_ = false;
+    void* d_transfer_ = nullptr;
+    uint64_t direct_calls_ = 0;
+    // A verifier uses a small fixed set of mapped input/output slice addresses.
+    std::vector<std::pair<const void*, void*>> mapped_aliases_;
+    uint64_t output_calls_ = 0, output_checks_ = 0;
+    std::vector<float> output_reference_;
     float* d_out_ = nullptr;
     uint8_t* d_q8_ = nullptr;
     float* d_scales_ = nullptr;
@@ -97,6 +170,9 @@ private:
     int32_t* d_tok_ = nullptr;
     int32_t* d_count_ = nullptr;
     unsigned long long* d_ptr_ = nullptr;
+    std::vector<uint64_t> cold_map_;
+    uint64_t cold_map_base_ = 0, cold_map_chunk_ = 0;
+    std::vector<std::pair<uint64_t,uint64_t>> cold_ranges_;
     std::vector<uint8_t> owned_;
     std::vector<uint8_t> layers_present_;
     std::vector<int32_t> group_of_, group_id_;

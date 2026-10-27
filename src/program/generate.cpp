@@ -6777,6 +6777,16 @@ int main(int argc, char** argv) {
     // promotion candidates (it would sit in both caches).  Asked live, from the helper's own cache (RemoteExperts::holds,
     // #854), so an expert the helper's tier swaps in or out later is followed - never a copy taken at load.
     const bool disjoint_adapt = [] { const char* v = std::getenv("STRATA_DISJOINT_ADAPT"); return v != nullptr && std::atoi(v) != 0; }();
+    const bool distinct_byte_adapt = [] { const char* v=std::getenv("STRATA_ADAPT_DISTINCT_BYTES"); return v && std::atoi(v)!=0; }();
+    const int helper_cache_swaps = [] {
+        const char* v=std::getenv("STRATA_REMOTE_CACHE_SWAPS"); return v ? std::clamp(std::atoi(v),0,128) : 0;
+    }();
+    if (helper_cache_swaps > 0 && (remote_opt || !disjoint_adapt || !distinct_byte_adapt || !o.serve ||
+        !o.adapt_async || o.adapt_every <= 0 || o.adapt_swaps <= 0 || o.batch != 0 || multi_gpu || peer.valid() ||
+        multi_remote || o.expert_cache_remote[0] <= 0 || srcp != &arena_src || adapt_overlap())) {
+        std::fprintf(stderr,"strata: helper cache swaps require one helper, warm arena, distinct-byte scores and disjoint asynchronous adaptation\n");
+        return 1;
+    }
     auto helper_holds = [&](int64_t l, int32_t e) -> bool {
         if (!disjoint_adapt) return false;
         for (int r = 0; r < drive.d.remote_count; ++r)
@@ -9979,6 +9989,7 @@ int main(int argc, char** argv) {
             }
         }
         drive.d.plan = ver.plan_sink();
+        ver.set_gpu_dispatch(&drive.d);
         // Foresight swap space (STRATA_FS_SLOTS; unset = null and nothing changes)
         std::unique_ptr<strata::core::ForesightSwap> fs_swap;
         {
@@ -10347,7 +10358,8 @@ int main(int argc, char** argv) {
                                   [](auto& a, auto& b) { return a.first < b.first; });
                 for (size_t i = 0; i < nc; ++i) {
                     if (cand[i].first < vict[i].first + o.adapt_min_gain) break;
-                    swaps.push_back({cand[i].first - vict[i].first, (int32_t) l, cand[i].second, vict[i].second});
+                    const float gain=(cand[i].first-vict[i].first)*(distinct_byte_adapt ? (float)strata::kernels::cpu::expert_layout().blob_bytes(l) : 1.0f);
+                    swaps.push_back({gain, (int32_t) l, cand[i].second, vict[i].second});
                 }
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
@@ -10621,7 +10633,8 @@ int main(int argc, char** argv) {
                                   [](auto& a, auto& b) { return a.first < b.first; });
                 for (size_t i = 0; i < nc; ++i) {
                     if (cand[i].first < vict[i].first + o.adapt_min_gain) break;
-                    all.push_back({cand[i].first - vict[i].first, (int32_t) l, cand[i].second, vict[i].second});
+                    const float gain=(cand[i].first-vict[i].first)*(distinct_byte_adapt ? (float)strata::kernels::cpu::expert_layout().blob_bytes(l) : 1.0f);
+                    all.push_back({gain, (int32_t) l, cand[i].second, vict[i].second});
                 }
             }
             std::sort(all.begin(), all.end(), [](const C& a, const C& b) { return a.gain > b.gain; });
@@ -10770,6 +10783,14 @@ int main(int argc, char** argv) {
                 switch (astate) {
                 case AState::Idle:
                     if (drain || a_win - a_last < (int64_t) o.adapt_every) return true;
+                    // No primary refill job or verify window is in flight here.
+                    // Update the helper map before the primary takes its snapshot;
+                    // it remains immutable until this primary round reaches Idle
+                    // again. Both choices exclude the other card's ownership.
+                    if (helper_cache_swaps > 0 && !remote_experts[0].rebalance_cache(drive.d.usage,host_res,pending,
+                                                                                  helper_cache_swaps,*srcp,err)) {
+                        std::fprintf(stderr,"strata helper cache: %s\n",err.c_str()); return false;
+                    }
                     a_last = a_win;
                     ++a_rounds;
                     a_t0 = Clock::now();
@@ -14244,6 +14265,11 @@ int main(int argc, char** argv) {
                                drive.d.pcie_experts};
             };
             const DecSnap ds0 = dec_snap();
+            strata::core::ExpertDispatch::CacheMeasure decode_cache0[64];
+            std::copy(std::begin(drive.d.cache_measure), std::end(drive.d.cache_measure), decode_cache0);
+            const uint64_t decode_pcie_bytes0 = drive.d.pcie_weight_bytes;
+            const uint64_t decode_helper_bytes0 = remote_experts[0].cache_upload_bytes();
+            const uint64_t decode_helper_fetch0 = drive.d.helper_weight_bytes;
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -15281,6 +15307,32 @@ int main(int argc, char** argv) {
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L),
                              dt_adapt_wait / w, dt_adapt_join / w, (double) ((ajob ? a_swapped : adapt_nswaps) - dt_sw0) / w);
+                strata::core::ExpertDispatch::CacheMeasure total{};
+                for(int l=0;l<std::min<int>(64,(int)g.n_layers);++l) {
+                    const auto& a=drive.d.cache_measure[l]; const auto& b=decode_cache0[l];
+                    if(a.groups[0]+a.groups[1]+a.groups[2]+a.groups[3]+a.groups[4]+a.groups[5]==0) continue;
+                    std::fprintf(stderr,"strata cache layer %d:",l);
+                    for(int c=0;c<6;++c) {
+                        const uint64_t groups=a.groups[c]-b.groups[c], entries=a.entries[c]-b.entries[c], bytes=a.bytes[c]-b.bytes[c];
+                        total.groups[c]+=groups;total.entries[c]+=entries;total.bytes[c]+=bytes;
+                        std::fprintf(stderr," %llu/%llu/%llu",(unsigned long long)groups,(unsigned long long)entries,(unsigned long long)bytes);
+                    }
+                    std::fprintf(stderr,"\n");
+                }
+                if(total.groups[0]+total.groups[1]+total.groups[2]+total.groups[3]+total.groups[4]+total.groups[5]) {
+                    std::fprintf(stderr,"strata decode cache:");
+                    for(int c=0;c<6;++c) std::fprintf(stderr," %llu/%llu/%llu",(unsigned long long)total.groups[c],(unsigned long long)total.entries[c],(unsigned long long)total.bytes[c]);
+                    std::fprintf(stderr,"\n");
+                }
+                const uint64_t weight_bytes = drive.d.pcie_weight_bytes - decode_pcie_bytes0;
+                std::fprintf(stderr, "strata decode traffic: %llu PCIe weight bytes, %.3f MB/output token; adaptive uploads excluded\n",
+                             (unsigned long long)weight_bytes, produced_n > 0 ? weight_bytes / (1e6 * produced_n) : 0.0);
+                if (drive.d.helper_weight_bytes > decode_helper_fetch0)
+                    std::fprintf(stderr,"strata decode helper cold traffic: %llu bytes; additive to primary PCIe weights\n",
+                        (unsigned long long)(drive.d.helper_weight_bytes-decode_helper_fetch0));
+                if (helper_cache_swaps > 0)
+                    std::fprintf(stderr,"strata decode helper uploads: %llu bytes\n",
+                                 (unsigned long long)(remote_experts[0].cache_upload_bytes()-decode_helper_bytes0));
                 if (aov)
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);
@@ -16237,6 +16289,7 @@ int main(int argc, char** argv) {
         // kernel needs no host CUDA call there, and costs ~1-3% decode on IQ3_S (45.3 -> 44.8 tok/s, 8 requests).
         ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
         drive.d.plan = ver.plan_sink();
+        ver.set_gpu_dispatch(&drive.d);
         drive.d.pcie_num = (int) (o.pcie_frac * 256.0 + 0.5);
         if (drive.d.pcie_num < 0) drive.d.pcie_num = 0;
         if (drive.d.pcie_num > 256) drive.d.pcie_num = 256;
@@ -16377,7 +16430,8 @@ int main(int argc, char** argv) {
                                   [](auto& a, auto& b) { return a.first < b.first; });
                 for (size_t i = 0; i < nc; ++i) {
                     if (cand[i].first < vict[i].first + 1.5f) break;
-                    swaps.push_back({cand[i].first - vict[i].first, (int32_t) l, cand[i].second, vict[i].second});
+                    const float gain=(cand[i].first-vict[i].first)*(distinct_byte_adapt ? (float)strata::kernels::cpu::expert_layout().blob_bytes(l) : 1.0f);
+                    swaps.push_back({gain, (int32_t) l, cand[i].second, vict[i].second});
                 }
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
