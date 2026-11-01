@@ -25,3 +25,6 @@ docker/compose/* text eol=lf
 
 # Apple tools (codesign, plutil) read these: LF only, wherever the repository is cloned
 *.plist text eol=lf
+
+# Reviewed overlay diffs keep their exact context markers and platform bytes.
+integrations/llama-swap/native-control.patch -text -whitespace

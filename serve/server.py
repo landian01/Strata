@@ -106,6 +106,7 @@ def popen(what: str, args: list, role: str = "engine", **kw):
 
 # How long close() gives the engine at each step of ending it (seconds). Module values so that a test can shorten them.
 ENGINE_QUIT_WAIT_S, ENGINE_TERM_WAIT_S, ENGINE_KILL_WAIT_S = 20, 5, 20
+CONTROL_READY_POLL_S = None       # opt-in control: Windows must check a stop while waiting for a silent loader
 
 
 def rttime_limit_note() -> str:
@@ -1061,7 +1062,10 @@ class StrataEngine:
                 timed_out = True
                 break
             try:
-                line = ready_q.get(timeout=left)
+                wait = left
+                if CONTROL_READY_POLL_S is not None and (wait is None or wait > CONTROL_READY_POLL_S):
+                    wait = CONTROL_READY_POLL_S
+                line = ready_q.get(timeout=wait)
             except queue.Empty:
                 continue
             if line is None:
@@ -2473,9 +2477,11 @@ class StrataEngine:
                     self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
                     self.proc.wait(timeout=ENGINE_QUIT_WAIT_S)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
+                    self.close_forced = True             # control mode must not call terminate/kill a graceful exit
                     self.proc.terminate()
                     self.proc.wait(timeout=ENGINE_TERM_WAIT_S)
         except subprocess.TimeoutExpired:
+            self.close_forced = True
             self.proc.kill()
             try:
                 self.proc.wait(timeout=ENGINE_KILL_WAIT_S)
@@ -2484,7 +2490,8 @@ class StrataEngine:
         except OSError:
             pass
         finally:
-            if self.proc.poll() is not None:
+            self.close_exit_code = self.proc.poll()       # retained after proc=None; also detect a nonzero QUIT exit
+            if self.close_exit_code is not None:
                 if self.pump is not None and self.pump.ident is not None:   # a restart can stop before starting it
                     self.pump.join(timeout=2)
                 try:
@@ -2893,6 +2900,7 @@ class Vision:
             proc.stdin.flush()
             proc.wait(timeout=10)
         except Exception:
+            self.close_forced = True
             try:
                 proc.kill()
             except OSError:
@@ -2901,6 +2909,7 @@ class Vision:
                 proc.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        self.close_exit_code = proc.poll()
         self.stopped = True
 
     def shutdown(self):
@@ -6724,6 +6733,10 @@ def make_handler(svc: Service):
             path = V1_V1_ALIASES.get(path, path)         # an Anthropic client given ".../v1" as its base posts /v1/v1/messages
             if path.startswith("/v1/") and self._foreign_page():
                 return
+            if path in ("/settings", "/config") and getattr(svc, "read_only_config", False):
+                self.close_connection = True             # no body read, and never interpret its remainder as a request
+                self._json(403, {"error": {"message": "configuration is read-only"}})
+                return
             if path == "/settings":
                 self._settings()
                 return
@@ -7007,6 +7020,9 @@ def make_handler(svc: Service):
             return True
 
         def _config_get(self):
+            if getattr(svc, "read_only_config", False):
+                self._json(403, {"error": {"message": "configuration is private and read-only"}})
+                return
             if not svc.config_path:
                 self._json(404, {"error": {"message": "this server was started without a run config"}})
                 return
@@ -8156,6 +8172,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     ap.add_argument("--port", type=int, default=8095)
     ap.add_argument("--ready-file", help="write a JSON instance record once the API is bound and model state is known")
     ap.add_argument("--owner-fd", type=int, help=argparse.SUPPRESS)
+    ap.add_argument("--control-file", help="opt-in private Windows control file (absolute path; foreground gateway child)")
+    ap.add_argument("--read-only-config", action="store_true",
+                    help="disable config/settings writes, hide the config, and ignore shared-settings sidecars")
     ap.add_argument("--shutdown-timeout", type=float, default=None,
                     help="opt-in graceful drain deadline in seconds (0..300) before owned requests are cancelled")
     ap.add_argument("--parallel", type=int, default=None,
@@ -8212,6 +8231,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                          "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
     launch_args = list(sys.argv[1:] if argv is None else argv)
     a = ap.parse_args(launch_args)
+    global CONTROL_READY_POLL_S
+    CONTROL_READY_POLL_S = 0.2 if a.control_file else None
     if a.engine == "strata" and (_rt := rttime_limit_note()):   # #3238: say it before the first unexplained -9
         print("[strata] WARNING: " + _rt, flush=True)
     global OPENS_BROWSER
@@ -8238,6 +8259,17 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             ap.error(str(exc))
     if a.shutdown_timeout is not None and not 0 <= a.shutdown_timeout <= 300:
         ap.error("--shutdown-timeout must be in 0..300 seconds")
+    native_control = None
+    if a.control_file:
+        if a.owner_fd is not None or a.shutdown_timeout is None:
+            ap.error("--control-file requires --shutdown-timeout and cannot be combined with --owner-fd")
+        from serve import control as control_api
+        try:
+            # Before config loading, tokenizer work, vision or any engine spawn. Refusal of private files, parent
+            # identity or the mandatory self job is fatal, not the lifeline's legacy best-effort containment.
+            native_control = control_api.Controller(a.control_file, request_stop, grace=a.shutdown_timeout + 55)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
     config_bytes = Path(a.config).read_bytes() if a.config else b""
     cfg = parse_config_text(config_bytes.decode("utf-8-sig"), a.config) if a.config else {}   # Notepad adds a BOM
     split_joined_args(cfg)
@@ -8441,6 +8473,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
     svc.launch_attestation = launch_attestation
+    svc.read_only_config = a.read_only_config
     svc.offline = a.offline
     svc.max_queue = max_queue
     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None
@@ -8594,9 +8627,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "strata" and layer_split_of(cfg)
                                      else None)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
-    if a.config:
+    if a.config and not a.read_only_config:
         svc.config_path = a.config                      # #564: the web page's Settings view
-    if a.config:                                        # the Chat settings shared with other apps, from last time
+    if a.config and not a.read_only_config:              # never load a private snapshot's same-stem shared sidecar
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:
             svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
@@ -8660,6 +8693,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             return 6
     if event_sink is not None:
         notify_lifecycle("ready", record)
+    if native_control is not None:
+        native_control.mark_ready()
     interrupted = False
     drained = True
     try:
@@ -8685,6 +8720,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                 print(f"[strata] drain deadline expired; cancelling {cancelled} owned request(s) ...", flush=True)
                 svc.wait_for_drain(5)
                 drained = False
+        forced_close = False
         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
         try:
@@ -8692,6 +8728,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                 try:
                     close()
                 except KeyboardInterrupt:               # a second Ctrl+C: don't wait for the engine to free its memory
+                    forced_close = True
                     if getattr(engine, "proc", None):
                         engine.proc.kill()
                         try:
@@ -8707,6 +8744,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             print("[strata] stopped", flush=True)
     exit_code = (8 if not drained else
                  interrupt_exit_code if interrupted and termination == "sigint" else 0)
+    if native_control is not None:
+        forced_close = (forced_close or control_api.close_failed(engine)
+                        or (vision is not None and control_api.close_failed(vision)))
+        if forced_close:
+            exit_code = 9
+            print("[strata] forced/nonzero engine close; graceful stop NOT confirmed", flush=True)
+        native_control.finish(exit_code, forced=forced_close)
     notify_lifecycle("stopped", {"instance_id": svc.instance_id, "reason": termination if interrupted else "normal",
                                  "drained": drained, "cancelled_requests": cancelled,
                                  "exit_code": exit_code})

@@ -13,6 +13,7 @@ import os
 import threading
 
 _job = None
+_self_job = None                 # opt-in control mode: includes us, so never close it in a running interpreter
 _lock = threading.Lock()
 
 if os.name == "nt":
@@ -46,6 +47,15 @@ if os.name == "nt":
     _k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
     _k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _k32.SetHandleInformation.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)
+    _k32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
+    _k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _k32.OpenProcess.restype = wintypes.HANDLE
+    _k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    _k32.WaitForSingleObject.restype = wintypes.DWORD
+    _k32.GetProcessTimes.argtypes = (wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4))
+    _k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
 
     def _make_job():
         job = _k32.CreateJobObjectW(None, None)     # no security attributes: the handle is not inherited
@@ -81,6 +91,110 @@ else:
         return False
 
 
+def require_self_job() -> None:
+    """Fail closed before spawning anything. Our non-inheritable handle owns us and all future descendants.
+
+    No BREAKAWAY flags are allowed. Nested-job refusal (including a restrictive gateway job) is a startup error,
+    never a warning. The handle intentionally lives until process exit, when the OS closes it.
+    """
+    global _self_job
+    if os.name != "nt":
+        raise OSError("--control-file currently requires Windows")
+    with _lock:
+        if _self_job:
+            return
+        job = _make_job()
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error(), "cannot create control-mode self job")
+        if not _k32.SetHandleInformation(job, 1, 0):
+            _k32.CloseHandle(job)
+            raise ctypes.WinError(ctypes.get_last_error(), "cannot make self-job handle non-inheritable")
+        if not _k32.AssignProcessToJobObject(job, _k32.GetCurrentProcess()):
+            error = ctypes.get_last_error()
+            _k32.CloseHandle(job)
+            raise ctypes.WinError(error, "cannot assign server to control-mode self job")
+        _self_job = job
+        inside = wintypes.BOOL()
+        if not _k32.IsProcessInJob(_k32.GetCurrentProcess(), job, ctypes.byref(inside)) or not inside.value:
+            raise OSError("cannot verify control-mode self job")
+
+
+def terminate_self_job(exit_code: int = 9) -> None:
+    """Deadline fallback: end only this server's strict job, including this process. Never search by process name."""
+    if os.name != "nt" or not _self_job:
+        raise OSError("no verified control-mode self job")
+    if not _k32.TerminateJobObject(_self_job, exit_code):
+        raise ctypes.WinError(ctypes.get_last_error(), "cannot terminate control-mode self job")
+
+
+class ProcessIdentity:
+    """A held process HANDLE plus kernel creation time. PID reuse cannot change what is waited on."""
+
+    def __init__(self, pid: int):
+        if os.name != "nt" or type(pid) is not int or not 0 < pid <= 0xffffffff:
+            raise ValueError("a positive Windows PID is required")
+        self.pid = pid
+        self.handle = _k32.OpenProcess(0x100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error(), "cannot open process identity")
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not _k32.GetProcessTimes(self.handle, *(ctypes.byref(t) for t in times)):
+                raise ctypes.WinError(ctypes.get_last_error(), "cannot read process creation time")
+            self.token = str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+        except BaseException:
+            self.close()
+            raise
+
+    def alive(self) -> bool:
+        result = _k32.WaitForSingleObject(self.handle, 0)
+        if result not in (0, 258):
+            raise OSError("cannot wait for process identity")
+        return result == 258
+
+    def exit_code(self) -> int:
+        if self.alive():
+            raise OSError("process has not exited")
+        code = wintypes.DWORD()
+        if not _k32.GetExitCodeProcess(self.handle, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error(), "cannot read process exit code")
+        return code.value
+
+    def close(self) -> None:
+        if self.handle:
+            _k32.CloseHandle(self.handle)
+            self.handle = None
+
+
+def direct_parent() -> ProcessIdentity:
+    """Open our direct parent before loading. Refuse an already-lost or reused parent PID."""
+    if os.name != "nt":
+        raise OSError("parent HANDLE monitoring requires Windows")
+
+    class BasicInfo(ctypes.Structure):
+        _fields_ = [("reserved", ctypes.c_void_p), ("peb", ctypes.c_void_p),
+                    ("reserved2", ctypes.c_void_p * 2), ("pid", ctypes.c_size_t), ("parent", ctypes.c_size_t)]
+
+    query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
+    query.argtypes = (wintypes.HANDLE, ctypes.c_ulong, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p)
+    query.restype = ctypes.c_long
+    info = BasicInfo()
+    if query(_k32.GetCurrentProcess(), 0, ctypes.byref(info), ctypes.sizeof(info), None) != 0:
+        raise OSError("cannot establish direct parent identity")
+    parent = ProcessIdentity(int(info.parent))
+    try:
+        current = ProcessIdentity(os.getpid())
+        try:
+            if int(parent.token) >= int(current.token) or not parent.alive():
+                raise OSError("direct parent exited or its PID was reused before monitoring")
+        finally:
+            current.close()
+    except BaseException:
+        parent.close()
+        raise
+    return parent
+
+
 def terminate() -> bool:
     """End every process in the job now (the deadline kill of an owner that must not leave a tree behind). False when
     there is no job (nothing was contained, or not Windows)."""
@@ -94,6 +208,14 @@ def contain(proc) -> bool:
     global _job
     if os.name != "nt" or proc is None:
         return False
+    if _self_job:
+        # Descendants inherit the strict job at CreateProcess, before any child code can run. Do not silently fall
+        # back to the old best-effort child job in control mode.
+        inside = wintypes.BOOL()
+        if not _k32.IsProcessInJob(int(proc._handle), _self_job, ctypes.byref(inside)) or not inside.value:
+            raise OSError("control-mode child did not inherit the server's self job")
+        no_throttle(int(proc._handle))
+        return True
     with _lock:
         if _job is None:
             _job = _make_job() or 0

@@ -1,0 +1,40 @@
+@echo off
+chcp 65001 > nul
+setlocal
+set "STRATA_DIRECT=@DEPLOYMENT@"
+set "STRATA_PAUSE=0"
+if "%~1"=="" set "STRATA_PAUSE=1"
+if /i "%~1"=="launch" shift
+if "%~1"=="" goto start
+if /i "%~1"=="--status" goto status
+if /i "%~1"=="--stop" goto stop
+if /i "%~1"=="--plan" goto plan
+if /i "%~1"=="--list-presets" goto list
+if /i "%~1"=="--preset" goto warm
+if /i "%~1"=="--restart" goto start
+if /i "%~1"=="--no-tui" goto start
+echo Unsupported argument: %~1
+echo Use launch, --status, --stop, --plan, --list-presets or --preset IQ3/IQ4.
+exit /b 2
+:start
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action Start
+goto done
+:status
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action Status
+goto done
+:stop
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action Stop
+goto done
+:plan
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action Plan
+goto done
+:list
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action List
+goto done
+:warm
+if "%~2"=="" exit /b 2
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%STRATA_DIRECT%\Invoke-Strata.ps1" -Action Warm -Preset "%~2"
+:done
+set "STRATA_EXIT=%errorlevel%"
+if "%STRATA_PAUSE%"=="1" pause
+exit /b %STRATA_EXIT%

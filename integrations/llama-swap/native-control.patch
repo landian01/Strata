@@ -1,0 +1,333 @@
+﻿diff --git a/serve/server.py b/serve/server.py
+index 71a55e1f0..1992a1b8a 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -106,6 +106,7 @@ def popen(what: str, args: list, role: str = "engine", **kw):
+ 
+ # How long close() gives the engine at each step of ending it (seconds). Module values so that a test can shorten them.
+ ENGINE_QUIT_WAIT_S, ENGINE_TERM_WAIT_S, ENGINE_KILL_WAIT_S = 20, 5, 20
++CONTROL_READY_POLL_S = None       # opt-in control: Windows must check a stop while waiting for a silent loader
+ 
+ 
+ def rttime_limit_note() -> str:
+@@ -1061,7 +1062,10 @@ class StrataEngine:
+                 timed_out = True
+                 break
+             try:
+-                line = ready_q.get(timeout=left)
++                wait = left
++                if CONTROL_READY_POLL_S is not None and (wait is None or wait > CONTROL_READY_POLL_S):
++                    wait = CONTROL_READY_POLL_S
++                line = ready_q.get(timeout=wait)
+             except queue.Empty:
+                 continue
+             if line is None:
+@@ -2473,9 +2477,11 @@ class StrataEngine:
+                     self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
+                     self.proc.wait(timeout=ENGINE_QUIT_WAIT_S)
+                 except (OSError, ValueError, subprocess.TimeoutExpired):
++                    self.close_forced = True             # control mode must not call terminate/kill a graceful exit
+                     self.proc.terminate()
+                     self.proc.wait(timeout=ENGINE_TERM_WAIT_S)
+         except subprocess.TimeoutExpired:
++            self.close_forced = True
+             self.proc.kill()
+             try:
+                 self.proc.wait(timeout=ENGINE_KILL_WAIT_S)
+@@ -2484,7 +2490,8 @@ class StrataEngine:
+         except OSError:
+             pass
+         finally:
+-            if self.proc.poll() is not None:
++            self.close_exit_code = self.proc.poll()       # retained after proc=None; also detect a nonzero QUIT exit
++            if self.close_exit_code is not None:
+                 if self.pump is not None and self.pump.ident is not None:   # a restart can stop before starting it
+                     self.pump.join(timeout=2)
+                 try:
+@@ -2893,6 +2900,7 @@ class Vision:
+             proc.stdin.flush()
+             proc.wait(timeout=10)
+         except Exception:
++            self.close_forced = True
+             try:
+                 proc.kill()
+             except OSError:
+@@ -2901,6 +2909,7 @@ class Vision:
+                 proc.wait(timeout=10)
+             except (OSError, subprocess.TimeoutExpired):
+                 pass
++        self.close_exit_code = proc.poll()
+         self.stopped = True
+ 
+     def shutdown(self):
+@@ -6724,6 +6733,10 @@ def make_handler(svc: Service):
+             path = V1_V1_ALIASES.get(path, path)         # an Anthropic client given ".../v1" as its base posts /v1/v1/messages
+             if path.startswith("/v1/") and self._foreign_page():
+                 return
++            if path in ("/settings", "/config") and getattr(svc, "read_only_config", False):
++                self.close_connection = True             # no body read, and never interpret its remainder as a request
++                self._json(403, {"error": {"message": "configuration is read-only"}})
++                return
+             if path == "/settings":
+                 self._settings()
+                 return
+@@ -7007,6 +7020,9 @@ def make_handler(svc: Service):
+             return True
+ 
+         def _config_get(self):
++            if getattr(svc, "read_only_config", False):
++                self._json(403, {"error": {"message": "configuration is private and read-only"}})
++                return
+             if not svc.config_path:
+                 self._json(404, {"error": {"message": "this server was started without a run config"}})
+                 return
+@@ -8156,6 +8172,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+     ap.add_argument("--port", type=int, default=8095)
+     ap.add_argument("--ready-file", help="write a JSON instance record once the API is bound and model state is known")
+     ap.add_argument("--owner-fd", type=int, help=argparse.SUPPRESS)
++    ap.add_argument("--control-file", help="opt-in private Windows control file (absolute path; foreground gateway child)")
++    ap.add_argument("--read-only-config", action="store_true",
++                    help="disable config/settings writes, hide the config, and ignore shared-settings sidecars")
+     ap.add_argument("--shutdown-timeout", type=float, default=None,
+                     help="opt-in graceful drain deadline in seconds (0..300) before owned requests are cancelled")
+     ap.add_argument("--parallel", type=int, default=None,
+@@ -8212,6 +8231,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+                          "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
+     launch_args = list(sys.argv[1:] if argv is None else argv)
+     a = ap.parse_args(launch_args)
++    global CONTROL_READY_POLL_S
++    CONTROL_READY_POLL_S = 0.2 if a.control_file else None
+     if a.engine == "strata" and (_rt := rttime_limit_note()):   # #3238: say it before the first unexplained -9
+         print("[strata] WARNING: " + _rt, flush=True)
+     global OPENS_BROWSER
+@@ -8238,6 +8259,17 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+             ap.error(str(exc))
+     if a.shutdown_timeout is not None and not 0 <= a.shutdown_timeout <= 300:
+         ap.error("--shutdown-timeout must be in 0..300 seconds")
++    native_control = None
++    if a.control_file:
++        if a.owner_fd is not None or a.shutdown_timeout is None:
++            ap.error("--control-file requires --shutdown-timeout and cannot be combined with --owner-fd")
++        from serve import control as control_api
++        try:
++            # Before config loading, tokenizer work, vision or any engine spawn. Refusal of private files, parent
++            # identity or the mandatory self job is fatal, not the lifeline's legacy best-effort containment.
++            native_control = control_api.Controller(a.control_file, request_stop, grace=a.shutdown_timeout + 55)
++        except (OSError, ValueError) as exc:
++            ap.error(str(exc))
+     config_bytes = Path(a.config).read_bytes() if a.config else b""
+     cfg = parse_config_text(config_bytes.decode("utf-8-sig"), a.config) if a.config else {}   # Notepad adds a BOM
+     split_joined_args(cfg)
+@@ -8441,6 +8473,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+                   sampling_defaults=sampling_defaults,
+                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
+     svc.launch_attestation = launch_attestation
++    svc.read_only_config = a.read_only_config
+     svc.offline = a.offline
+     svc.max_queue = max_queue
+     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None
+@@ -8594,9 +8627,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+     svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "strata" and layer_split_of(cfg)
+                                      else None)
+     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+-    if a.config:
++    if a.config and not a.read_only_config:
+         svc.config_path = a.config                      # #564: the web page's Settings view
+-    if a.config:                                        # the Chat settings shared with other apps, from last time
++    if a.config and not a.read_only_config:              # never load a private snapshot's same-stem shared sidecar
+         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
+         try:
+             svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
+@@ -8660,6 +8693,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+             return 6
+     if event_sink is not None:
+         notify_lifecycle("ready", record)
++    if native_control is not None:
++        native_control.mark_ready()
+     interrupted = False
+     drained = True
+     try:
+@@ -8685,6 +8720,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+                 print(f"[strata] drain deadline expired; cancelling {cancelled} owned request(s) ...", flush=True)
+                 svc.wait_for_drain(5)
+                 drained = False
++        forced_close = False
+         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
+                    hub.close if hub is not None else None]
+         try:
+@@ -8692,6 +8728,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+                 try:
+                     close()
+                 except KeyboardInterrupt:               # a second Ctrl+C: don't wait for the engine to free its memory
++                    forced_close = True
+                     if getattr(engine, "proc", None):
+                         engine.proc.kill()
+                         try:
+@@ -8707,6 +8744,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
+             print("[strata] stopped", flush=True)
+     exit_code = (8 if not drained else
+                  interrupt_exit_code if interrupted and termination == "sigint" else 0)
++    if native_control is not None:
++        forced_close = (forced_close or control_api.close_failed(engine)
++                        or (vision is not None and control_api.close_failed(vision)))
++        if forced_close:
++            exit_code = 9
++            print("[strata] forced/nonzero engine close; graceful stop NOT confirmed", flush=True)
++        native_control.finish(exit_code, forced=forced_close)
+     notify_lifecycle("stopped", {"instance_id": svc.instance_id, "reason": termination if interrupted else "normal",
+                                  "drained": drained, "cancelled_requests": cancelled,
+                                  "exit_code": exit_code})
+diff --git a/serve/winjob.py b/serve/winjob.py
+index 11db01c25..818849d5d 100644
+--- a/serve/winjob.py
++++ b/serve/winjob.py
+@@ -13,6 +13,7 @@ import os
+ import threading
+ 
+ _job = None
++_self_job = None                 # opt-in control mode: includes us, so never close it in a running interpreter
+ _lock = threading.Lock()
+ 
+ if os.name == "nt":
+@@ -46,6 +47,15 @@ if os.name == "nt":
+     _k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+     _k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+     _k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
++    _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
++    _k32.SetHandleInformation.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)
++    _k32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
++    _k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
++    _k32.OpenProcess.restype = wintypes.HANDLE
++    _k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
++    _k32.WaitForSingleObject.restype = wintypes.DWORD
++    _k32.GetProcessTimes.argtypes = (wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4))
++    _k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+ 
+     def _make_job():
+         job = _k32.CreateJobObjectW(None, None)     # no security attributes: the handle is not inherited
+@@ -81,6 +91,110 @@ else:
+         return False
+ 
+ 
++def require_self_job() -> None:
++    """Fail closed before spawning anything. Our non-inheritable handle owns us and all future descendants.
++
++    No BREAKAWAY flags are allowed. Nested-job refusal (including a restrictive gateway job) is a startup error,
++    never a warning. The handle intentionally lives until process exit, when the OS closes it.
++    """
++    global _self_job
++    if os.name != "nt":
++        raise OSError("--control-file currently requires Windows")
++    with _lock:
++        if _self_job:
++            return
++        job = _make_job()
++        if not job:
++            raise ctypes.WinError(ctypes.get_last_error(), "cannot create control-mode self job")
++        if not _k32.SetHandleInformation(job, 1, 0):
++            _k32.CloseHandle(job)
++            raise ctypes.WinError(ctypes.get_last_error(), "cannot make self-job handle non-inheritable")
++        if not _k32.AssignProcessToJobObject(job, _k32.GetCurrentProcess()):
++            error = ctypes.get_last_error()
++            _k32.CloseHandle(job)
++            raise ctypes.WinError(error, "cannot assign server to control-mode self job")
++        _self_job = job
++        inside = wintypes.BOOL()
++        if not _k32.IsProcessInJob(_k32.GetCurrentProcess(), job, ctypes.byref(inside)) or not inside.value:
++            raise OSError("cannot verify control-mode self job")
++
++
++def terminate_self_job(exit_code: int = 9) -> None:
++    """Deadline fallback: end only this server's strict job, including this process. Never search by process name."""
++    if os.name != "nt" or not _self_job:
++        raise OSError("no verified control-mode self job")
++    if not _k32.TerminateJobObject(_self_job, exit_code):
++        raise ctypes.WinError(ctypes.get_last_error(), "cannot terminate control-mode self job")
++
++
++class ProcessIdentity:
++    """A held process HANDLE plus kernel creation time. PID reuse cannot change what is waited on."""
++
++    def __init__(self, pid: int):
++        if os.name != "nt" or type(pid) is not int or not 0 < pid <= 0xffffffff:
++            raise ValueError("a positive Windows PID is required")
++        self.pid = pid
++        self.handle = _k32.OpenProcess(0x100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
++        if not self.handle:
++            raise ctypes.WinError(ctypes.get_last_error(), "cannot open process identity")
++        try:
++            times = [wintypes.FILETIME() for _ in range(4)]
++            if not _k32.GetProcessTimes(self.handle, *(ctypes.byref(t) for t in times)):
++                raise ctypes.WinError(ctypes.get_last_error(), "cannot read process creation time")
++            self.token = str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
++        except BaseException:
++            self.close()
++            raise
++
++    def alive(self) -> bool:
++        result = _k32.WaitForSingleObject(self.handle, 0)
++        if result not in (0, 258):
++            raise OSError("cannot wait for process identity")
++        return result == 258
++
++    def exit_code(self) -> int:
++        if self.alive():
++            raise OSError("process has not exited")
++        code = wintypes.DWORD()
++        if not _k32.GetExitCodeProcess(self.handle, ctypes.byref(code)):
++            raise ctypes.WinError(ctypes.get_last_error(), "cannot read process exit code")
++        return code.value
++
++    def close(self) -> None:
++        if self.handle:
++            _k32.CloseHandle(self.handle)
++            self.handle = None
++
++
++def direct_parent() -> ProcessIdentity:
++    """Open our direct parent before loading. Refuse an already-lost or reused parent PID."""
++    if os.name != "nt":
++        raise OSError("parent HANDLE monitoring requires Windows")
++
++    class BasicInfo(ctypes.Structure):
++        _fields_ = [("reserved", ctypes.c_void_p), ("peb", ctypes.c_void_p),
++                    ("reserved2", ctypes.c_void_p * 2), ("pid", ctypes.c_size_t), ("parent", ctypes.c_size_t)]
++
++    query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
++    query.argtypes = (wintypes.HANDLE, ctypes.c_ulong, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p)
++    query.restype = ctypes.c_long
++    info = BasicInfo()
++    if query(_k32.GetCurrentProcess(), 0, ctypes.byref(info), ctypes.sizeof(info), None) != 0:
++        raise OSError("cannot establish direct parent identity")
++    parent = ProcessIdentity(int(info.parent))
++    try:
++        current = ProcessIdentity(os.getpid())
++        try:
++            if int(parent.token) >= int(current.token) or not parent.alive():
++                raise OSError("direct parent exited or its PID was reused before monitoring")
++        finally:
++            current.close()
++    except BaseException:
++        parent.close()
++        raise
++    return parent
++
++
+ def terminate() -> bool:
+     """End every process in the job now (the deadline kill of an owner that must not leave a tree behind). False when
+     there is no job (nothing was contained, or not Windows)."""
+@@ -94,6 +208,14 @@ def contain(proc) -> bool:
+     global _job
+     if os.name != "nt" or proc is None:
+         return False
++    if _self_job:
++        # Descendants inherit the strict job at CreateProcess, before any child code can run. Do not silently fall
++        # back to the old best-effort child job in control mode.
++        inside = wintypes.BOOL()
++        if not _k32.IsProcessInJob(int(proc._handle), _self_job, ctypes.byref(inside)) or not inside.value:
++            raise OSError("control-mode child did not inherit the server's self job")
++        no_throttle(int(proc._handle))
++        return True
+     with _lock:
+         if _job is None:
+             _job = _make_job() or 0
