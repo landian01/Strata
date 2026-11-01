@@ -342,7 +342,7 @@ function Warm-Model([string]$Name) {
 
 try {
     $result = switch ($Action) {
-        'Plan' { Assert-Install; @{ ok = $true; plan = $true; mode = 'direct-native'; api_url = $BaseUrl + '/v1'; bindings = $Manifest.bindings; models_and_engine_unchanged = $true } }
+        'Plan' { Assert-Install; @{ ok = $true; plan = $true; mode = 'direct-native'; api_url = $BaseUrl + '/v1'; bindings = $Manifest.bindings; models_unchanged = $true; engine_unchanged = [bool]$Manifest.models_and_engine_unchanged; models_and_engine_unchanged = [bool]$Manifest.models_and_engine_unchanged } }
         'List' { @{ ok = $true; bindings = $Manifest.bindings } }
         'Status' { Status }
         'Start' { With-OperationLock { Start-Gateway } }

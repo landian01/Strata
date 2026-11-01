@@ -1,11 +1,13 @@
 # CPU-only tests for the one-shot entry's state/locking helpers. No gateway or model is started.
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$OutputDirectory)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,
+      [string]$ValidationRoot = 'D:\Strata\production\validation')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $directory = [IO.Path]::GetFullPath($OutputDirectory)
-if (-not $directory.StartsWith('D:\Strata\production\validation\', [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $directory)) {
-    throw 'Tests require a NEW directory under D:\Strata\production\validation.'
+$allowed = [IO.Path]::GetFullPath($ValidationRoot).TrimEnd('\') + '\'
+if (-not $directory.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $directory)) {
+    throw 'Tests require a NEW directory under ValidationRoot.'
 }
 $null = New-Item -ItemType Directory -Path $directory
 $tokens=$null; $parseErrors=$null

@@ -7,14 +7,16 @@ itself Python; this integration does not replace it with another server.
 ## Scope
 
 This is an opt-in deployment recipe for an existing, pinned two-model install.
-It does not install a new engine, download or repack weights, or retune GPUs.
+It never downloads, repacks weights, tunes a GPU or starts a model while staging.
 The original installed Terminal, engine, two model configurations and expert maps
 are inputs, not edit targets. The staging tool checks their recorded hashes.
 
-The foreground service is copied from the installed Terminal into a versioned
-native-runtime snapshot. Only the reviewed native control patch is applied, so
-fixes already present in the installed package are retained. Model configuration
-copies have exactly the original bytes; private ports are command-line overrides.
+The legacy invocation copies the foreground service from Terminal 0.1.51 and
+applies the reviewed control patch. Its configuration copies keep the original
+bytes. The explicit upgrade invocation instead takes an already installed Control
+bundle, a new immutable engine folder and the complete reviewed native source.
+It never applies the old patch to new code. Private ports remain command-line
+overrides. Neither path adds a daemon or changes the production entry point.
 
 ## Why the small native patch exists
 
@@ -71,6 +73,57 @@ The shared control file additionally prevents both model services from running a
 once. Environment variables explicitly disable saved tuning and acquisition.
 The one-shot entry point also clears inherited Strata tuning and CUDA renumbering.
 
+## Explicit Control / engine upgrade
+
+Use all four input parameters together. This keeps the old invocation unchanged:
+
+```powershell
+$source = 'D:\Strata\upgrade\v029-20261101-1\source'
+$python = 'D:\Strata\upgrade\v029-20261101-1\components\control\python\python.exe'
+& $python -B "$source\integrations\llama-swap\stage.py" `
+  --root D:\Strata `
+  --output D:\Strata\upgrade\v029-20261101-1\direct-candidate-NEW `
+  --terminal-root D:\Strata\upgrade\v029-20261101-1\components\control `
+  --engine-dir D:\Strata\production\engine\NEW-IMMUTABLE-CUSTOM-ENGINE `
+  --native-source $source `
+  --baseline-manifest D:\Strata\production\direct-api-20261101-7\manifest.json `
+  --expected-engine-version 0.1.55 --engine-commit REVIEWED-ENGINE-COMMIT
+```
+
+The engine folder must already contain its executable and runtime DLLs; nothing is
+built or fetched by staging. The Control bundle supplies Python and dependencies,
+not an old copy of the native server. The snapshot copies the complete serving
+source payload from the reviewed worktree and hashes every copied file. The
+manifest also pins the baseline's protected files and assets, the new engine
+folder, the interpreter and Control metadata. Nested runtime library folders may
+be declared by the engine's build metadata, but must stay inside that package.
+A source checkout without archive version metadata takes that small metadata file
+from the selected Control bundle, with its origin recorded separately. The
+recorded source HEAD is provenance; exact working-tree file hashes and the complete
+snapshot tree digest identify the native runtime.
+
+Only `exe`, `lib_dirs`, `cwd` and `log` may change in the copied model JSON. Every
+other field must compare equal, including ordered `args`, `env`, GPU order/roles,
+cache sizes, context and MTP. `--declare-mtp` explicitly adds `drafting: mtp` only
+when it freezes the baseline's existing MTP choice; it is recorded, never inferred.
+Two isolated CPU imports compare the baseline and candidate startup arguments and
+`child_env` results. The current recipe accepts only default/`start` effort
+position and calls the real `effort_end_args` to verify its suffix is empty.
+`end` needs a separate tokenizer/binary proof and is refused, never guessed or
+trimmed from an observed command line. The imports forbid subprocesses and sockets
+and inject the Blackwell
+card class: this is a pure-function test, **not** a GPU or live environment
+measurement. A changed effective argument, tuning environment or GPU order refuses
+staging. Weight bytes are neither recopied nor rehashed; their original paths and
+configuration references stay fixed.
+
+The output must be new, either directly under the production directory or beside
+the candidate worktree, never inside it. Candidate state and validation default to
+sibling directories; `--state-directory` can choose a different new private state
+folder. Partial failures remain for inspection, without an accepted manifest.
+The combined old “models and engine unchanged” claim is false for an upgrade;
+model preservation and engine replacement are declared separately.
+
 ## Verify before changing the entry point
 
 ```powershell
@@ -89,6 +142,21 @@ Checks include model aliases, an unknown model returning 404, same-model process
 reuse, read-only settings, cross-model SSE completion, client disconnect recovery,
 reverse switching, explicit Pause during a stream, abrupt gateway exit, released
 ports, and protected file hashes. Retain failed runs as well as accepted ones.
+For upgraded manifests both verifiers assert the real engine's `INFO engine=`
+version and the accepted slots, workers, MTP, context and KV values. The version
+can also be required with `--expected-engine-version 0.1.55`; package metadata is
+not a substitute. Available live child executable, command-line and relevant
+environment fields are checked against the manifest. Windows permission refusal
+is recorded as `NOT_VERIFIED`, never turned into evidence or repaired by changing
+process permissions. The CPU configuration proof and real engine INFO checks are
+reported separately from that limitation.
+
+Normal ready shutdown requires a matching final identity, ready/graceful state,
+and zero status and actual held-HANDLE exit codes. Loading cancellation must stay
+an explicit non-ready abort with nonzero Warm/stop-client exits, not a graceful
+model stop. Both verifiers accept `--validation-root` for isolated test evidence;
+otherwise the manifest chooses the candidate or legacy validation directory.
+
 These are lifecycle and deployment smoke checks, not broad quality or performance
 benchmarks. Windows native control tests are in [the CPU-only unittest](../../serve/test_control.py).
 The one-shot helper race/locking checks are in [test_entry.ps1](test_entry.ps1);
@@ -128,4 +196,7 @@ a dated backup. Do not overwrite the old integration, original model JSON, exper
 maps, engine or installed Terminal. Restore the backed-up entry points only after
 the direct service is stopped; never run both entry points on the same ports.
 
-A gateway upgrade or engine upgrade is a separate change with separate testing.
+A gateway or engine replacement still needs separate live acceptance. The CPU
+staging tests in [test_stage.py](test_stage.py) use fake payloads and mocked ACL /
+shaping calls; passing them is not Windows ACL, GPU or live-model acceptance.
+The helper tests accept `-ValidationRoot` while retaining their legacy default.

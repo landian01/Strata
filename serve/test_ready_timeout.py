@@ -84,7 +84,8 @@ class ReadyTimeout(unittest.TestCase):
         # lazy start: restart()'s own bookkeeping must not crash on the missing slot_cv either (#1527)
         svc = self.service(self.make_script('silent', SILENT))
         httpd = serve(svc, port=0)
-        self.addCleanup(httpd.shutdown); self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)  # cleanups are LIFO: stop serving before closing the socket
         base = f'http://127.0.0.1:{httpd.server_address[1]}'
         self.assert503(base)
         self.assertFalse(svc.engine.starting)
@@ -94,7 +95,8 @@ class ReadyTimeout(unittest.TestCase):
         hang = self.root / 'hang'
         svc = self.service(self.make_script('hang_on_restart', HANG_ON_RESTART), ('--hang', str(hang)))
         httpd = serve(svc, port=0)
-        self.addCleanup(httpd.shutdown); self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)  # cleanups are LIFO: stop serving before closing the socket
         base = f'http://127.0.0.1:{httpd.server_address[1]}'
         status, _ = self.post(base)                              # first request: the engine works
         self.assertEqual(status, 200)
@@ -117,7 +119,8 @@ class SpawnFailure(unittest.TestCase):
         eng = StrataEngine(str(root / 'no-such-engine'), [], log=str(root / 'engine.log'), lazy=True)
         svc = Service(eng, ByteTokenizer(), ChatTemplate(Path(__file__).parent / 'chat_template.jinja'))
         httpd = serve(svc, port=0)
-        self.addCleanup(httpd.shutdown); self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)  # cleanups are LIFO: stop serving before closing the socket
         base = f'http://127.0.0.1:{httpd.server_address[1]}'
         before = set(threading.enumerate())
         cases = list(self.BODIES.items()) + [('/v1/chat/completions',

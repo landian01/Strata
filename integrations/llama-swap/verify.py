@@ -21,6 +21,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from contracts import assert_metrics, expected_metrics, observe_engine, validation_root
+
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -67,14 +69,19 @@ def main(argv=None):
     parser.add_argument("--deployment", required=True, type=Path)
     parser.add_argument("--mode", choices=("cpu", "live"), required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--validation-root", type=Path, help="explicit isolated validation root; defaults to manifest")
+    parser.add_argument("--expected-engine-version", help="assert the real engine INFO version (live only)")
     args = parser.parse_args(argv)
     manifest = load(args.deployment / "manifest.json")
     root = Path(manifest["root"])
     output = args.output.resolve()
-    if not output.is_relative_to(root / "production/validation") or output.exists():
-        raise ValueError("output must be a NEW directory under ROOT/production/validation")
+    if not output.is_relative_to(validation_root(manifest, args.validation_root)) or output.exists():
+        raise ValueError("output must be a NEW directory under the declared validation root")
+    expected_version = args.expected_engine_version or manifest.get("expected_engine_version")
+    if args.expected_engine_version and manifest.get("expected_engine_version") not in (None, args.expected_engine_version):
+        raise ValueError("expected engine version disagrees with the pinned manifest")
     output.mkdir(parents=True)
-    sys.path.insert(0, str(root / "terminal/0.1.51"))
+    sys.path.insert(0, manifest["runtime"])
     import psutil
     from strata_control import private_files
     control_dir = output / "control"
@@ -158,15 +165,13 @@ def main(argv=None):
             assert status == 200, metrics
             engine = metrics["engine"]
             cfg = load(binding["config"])
-            flags = dict(zip(cfg["args"][::2], cfg["args"][1::2]))
-            main_slots, helper_slots = binding["expected_slots"]
-            expected = {"model": canonical, "expert_slots_primary": main_slots,
-                        "expert_slots": main_slots + helper_slots, "pool_workers": 5, "mtp_max": 6,
-                        "max_context": int(flags["--max-context"]), "kv": flags["--kv"],
-                        "kv_resident": int(flags["--kv-resident"])}
-            for key, value in expected.items():
-                assert engine.get(key) == value, (key, engine.get(key), value)
+            expected = expected_metrics(binding, cfg, expected_version)
+            assert_metrics(engine, expected)
             item["engine"] = expected
+            item["live_engine_inspection"] = observe_engine(psutil, process, cfg, binding)
+            if item["live_engine_inspection"]["status"] == "NOT_VERIFIED":
+                report.setdefault("verification_limits", []).append({"native_pid": process.pid,
+                    "live_engine_process_fields": "NOT_VERIFIED", "reason": item["live_engine_inspection"]["reason"]})
         return item
 
     def gone(item):

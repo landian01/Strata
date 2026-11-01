@@ -1,8 +1,9 @@
 """Stage a pinned, direct llama-swap deployment. One-shot; never starts a model.
 
-The existing engine, installed Terminal and model files are read-only inputs.
-The foreground server is the installed native service plus the reviewed opt-in
-control patch, not an extra long-lived backend or owner process.
+The engine, installed Control/Terminal and model files are read-only inputs.
+Legacy calls use the installed native service plus the reviewed control patch.
+Explicit upgrade calls snapshot complete reviewed source without that old patch.
+Neither route adds a long-lived backend or owner process.
 """
 from __future__ import annotations
 
@@ -47,9 +48,27 @@ def main(argv=None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--patch", type=Path, default=HERE / "native-control.patch",
                         help="reviewed native-only overlay patch (defaults to the versioned patch beside this tool)")
+    parser.add_argument("--terminal-root", type=Path, help="unpacked Windows Control bundle (Python and dependencies)")
+    parser.add_argument("--engine-dir", type=Path, help="immutable custom engine folder containing strata.exe and DLLs")
+    parser.add_argument("--native-source", type=Path, help="complete reviewed candidate source; NEVER apply the legacy patch")
+    parser.add_argument("--baseline-manifest", type=Path, help="accepted direct-native manifest; all baseline inputs remain pinned")
+    parser.add_argument("--expected-engine-version", help="required live INFO engine= version, e.g. 0.1.55")
+    parser.add_argument("--engine-commit", help="engine source provenance (does not substitute for binary hashes)")
+    parser.add_argument("--state-directory", type=Path, help="NEW private candidate state directory")
+    parser.add_argument("--declare-mtp", action="store_true", help="explicitly freeze an existing MTP choice; never edits args")
     parser.add_argument("--port", type=int, default=8081)
     parser.add_argument("--backend-ports", type=int, nargs=2, default=(18181, 18182))
     args = parser.parse_args(argv)
+    explicit = (args.terminal_root, args.engine_dir, args.native_source, args.baseline_manifest)
+    if any(explicit):
+        if not all(explicit):
+            parser.error("upgrade staging requires --terminal-root, --engine-dir, --native-source and --baseline-manifest together")
+        if len({args.port, *args.backend_ports}) != 3 or not all(1024 <= p <= 65535 for p in (args.port, *args.backend_ports)):
+            parser.error("three distinct unprivileged ports are required")
+        from candidate_stage import stage_candidate
+        return stage_candidate(args)
+    if args.state_directory or args.declare_mtp or args.expected_engine_version or args.engine_commit:
+        parser.error("upgrade-only options require the four explicit upgrade paths")
     root, output = args.root.resolve(), args.output.resolve()
     if output.parent != root / "production" or output.exists():
         raise ValueError("output must be a NEW directory directly inside ROOT/production")
