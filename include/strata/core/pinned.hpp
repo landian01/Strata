@@ -93,6 +93,9 @@ struct PinnedArena {
     // Opt-in CUDA host VMM: only this GPU maps the weights. CPU access and H2D copies remain available.
     int vmm_device = -1;
     std::vector<std::pair<uint64_t, uint64_t>> vmm_chunks;
+    /// shared-file arena only: the load state word in the file's header (0: nobody has loaded it, a pid: that engine is
+    /// loading it, ~0: it is complete).  Shared by every engine that maps the file; null for a private arena.
+    std::atomic<uint64_t>* shared_state = nullptr;
     ~PinnedArena();
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;

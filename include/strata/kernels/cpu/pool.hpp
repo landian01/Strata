@@ -259,6 +259,7 @@ public:
     // before the host joins its drain. It must not throw or touch pool/job state.
     using PublishedWork = void (*)(void*);
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n,
+                                NativeArithmetic arithmetic = NativeArithmetic::Default,
                                 PublishedWork published_work = nullptr, void* work_ctx = nullptr);
     static constexpr int kMaxSplitMulti = 96;
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
@@ -404,6 +405,7 @@ private:
         alignas(64) uint8_t hq[MAXT][kNativeHBytes];   // plan v0.3 P6: native down activations
     };
     const NativeFmt* nfmt_ = nullptr;
+    NativeArithmetic narithmetic_ = NativeArithmetic::Default;
     std::vector<SplitBufMulti> split_multi_;
     // STRATA_NUMA_SPLIT=1 (opt-in, Linux, exactly 2 nodes): in the native row phases (modes 5/6) every expert's rows
     // are cut into one slice per NUMA node (slice k = rows [per*k/2, per*(k+1)/2) of the gate/up or down matrix, the

@@ -10,7 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <chrono>
-#include <immintrin.h>
+#include "strata/platform/cpu_relax.hpp"
 #if defined(_MSC_VER)
 #include <intrin.h>   // __cpuidex, __rdtsc (STRATA_POOL_UMWAIT)
 #endif
@@ -1110,7 +1110,7 @@ void ExpertPool::worker(int id) {
             } else
 #endif
             {
-                _mm_pause();
+                strata_cpu_pause();
                 if ((++spins & 1023u) != 0) continue;
             }
             if (std::chrono::steady_clock::now() - parked_at < spin_before_sleep_) continue;
@@ -1231,7 +1231,7 @@ void ExpertPool::wait_parked(const char* what) {
     uint32_t spins = 0;
     std::chrono::steady_clock::time_point t0{};
     while (parked_count() != (uint32_t) n_) {
-        _mm_pause();
+        strata_cpu_pause();
         if ((++spins & 1023u) != 0) continue;
         const auto now = std::chrono::steady_clock::now();
         if (spins == 1024u) t0 = now;
@@ -1258,7 +1258,7 @@ void ExpertPool::wait_done(int n) {
         else
             d = done_.load(std::memory_order_acquire);
         if (d >= (uint32_t) n) return;                                // `>=`: never a wait that an overshoot outlives
-        _mm_pause();
+        strata_cpu_pause();
         if ((++spins & 1023u) != 0) continue;
         const auto now = std::chrono::steady_clock::now();
         if (spins == 1024u || d != seen) { t0 = now; seen = d; }     // progress restarts the clock
@@ -1348,7 +1348,10 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 } else if (mode_ == 5) {
                     float* ff[MAXT];
                     for (int t = 0; t < mjobs_[e].nt; ++t) ff[t] = sb.ff[t];
-                    native_gu_rows(*nfmt, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    if (narithmetic_ == NativeArithmetic::WindowInvariant)
+                        native_gu_rows_invariant(*nfmt, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    else
+                        native_gu_rows(*nfmt, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
                 } else if (q2_native_kernels(nfmt->d_type)) {
                     // Q2_0 down (most IQ layers): the AVX-512 kernel, ggml-cpu has only a scalar one on x86
                     const ActQ* a2[MAXT];
@@ -1358,7 +1361,10 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 } else {
                     const void* hq[MAXT];
                     for (int t = 0; t < mjobs_[e].nt; ++t) hq[t] = sb.hq[t];
-                    native_down_rows(*nfmt, mjobs_[e].blob, hq, mjobs_[e].nt, mjobs_[e].out, r0, r1);
+                    if (narithmetic_ == NativeArithmetic::WindowInvariant)
+                        native_down_rows_invariant(*nfmt, mjobs_[e].blob, hq, mjobs_[e].nt, mjobs_[e].out, r0, r1);
+                    else
+                        native_down_rows(*nfmt, mjobs_[e].blob, hq, mjobs_[e].nt, mjobs_[e].out, r0, r1);
                 }
                 g += l1 - l0;
             }
@@ -1539,7 +1545,10 @@ void ExpertPool::native_dag_rows(int e, bool down, int r0, int r1) {
     } else if (!down) {
         float* ff[MAXT];
         for (int t = 0; t < job.nt; ++t) ff[t] = sb.ff[t];
-        native_gu_rows(*nf, job.blob, job.nact, job.nt, ff, r0, r1);
+        if (narithmetic_ == NativeArithmetic::WindowInvariant)
+            native_gu_rows_invariant(*nf, job.blob, job.nact, job.nt, ff, r0, r1);
+        else
+            native_gu_rows(*nf, job.blob, job.nact, job.nt, ff, r0, r1);
     } else if (q2_native_kernels(nf->d_type)) {
         const ActQ* a2[MAXT];
         for (int t = 0; t < job.nt; ++t) a2[t] = &sb.a2[t];
@@ -1548,7 +1557,10 @@ void ExpertPool::native_dag_rows(int e, bool down, int r0, int r1) {
     } else {
         const void* hq[MAXT];
         for (int t = 0; t < job.nt; ++t) hq[t] = sb.hq[t];
-        native_down_rows(*nf, job.blob, hq, job.nt, job.out, r0, r1);
+        if (narithmetic_ == NativeArithmetic::WindowInvariant)
+            native_down_rows_invariant(*nf, job.blob, hq, job.nt, job.out, r0, r1);
+        else
+            native_down_rows(*nf, job.blob, hq, job.nt, job.out, r0, r1);
     }
 }
 
@@ -1623,7 +1635,7 @@ void ExpertPool::drain_native_ready() {
             if (dag_measure_) dag_empty_exits_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        for (int pause = 0; pause < 8; ++pause) _mm_pause();
+        for (int pause = 0; pause < 8; ++pause) strata_cpu_pause();
         if ((++spins & 8191u) == 0 && std::chrono::steady_clock::now() - started > kStall) {
             std::fprintf(stderr, "strata: ready DAG stalled (%d of %d complete)\n", dag_done_.load(), dag_count_);
             std::abort();
@@ -1679,7 +1691,7 @@ void ExpertPool::drain_native_dag(int worker) {
             }
             continue;
         }
-        _mm_pause();
+        strata_cpu_pause();
         if ((++spins & 65535u) == 0 && std::chrono::steady_clock::now() - started > kStall) {
             std::fprintf(stderr, "strata: native expert DAG stalled (%d of %d complete)\n",
                          dag_done_.load(), dag_count_);
@@ -1738,7 +1750,7 @@ void ExpertPool::run_native_dag(const NativeFmt& f, ExpertJobMulti* jobs, int n,
 }
 
 void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n,
-                                        PublishedWork published_work, void* work_ctx) {
+                                        NativeArithmetic arithmetic, PublishedWork published_work, void* work_ctx) {
     if (n <= 0) {
         if (published_work) published_work(work_ctx);
         return;
@@ -1747,6 +1759,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     static const bool verify = [] { const char* v = std::getenv("STRATA_CPU_EXPERT_DAG_VERIFY"); return v && std::atoi(v) != 0; }();
     static thread_local bool reference_pass = false;
     if (dag && !reference_pass && numa_n_ == 0 && f.n_embd == H && f.n_ff == FF) {
+        narithmetic_ = arithmetic;
         dag_measure_ = verify;
         run_native_dag(f, jobs, n, published_work, work_ctx);
         ++dag_calls_;
@@ -1767,7 +1780,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
                 }
             }
             reference_pass = true;
-            run_split_multi_native(f, reference_jobs.data(), n);
+            run_split_multi_native(f, reference_jobs.data(), n, arithmetic);
             reference_pass = false;
             offset = 0;
             for (int e = 0; e < n; ++e) for (int t = 0; t < jobs[e].nt; ++t) {
@@ -1795,6 +1808,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         const int nb = (std::min)(kMaxSplitMulti, n - b0);
         mjobs_ = jobs + b0;
         nfmt_ = &f;
+        narithmetic_ = arithmetic;
         mrows_ = (int64_t) nb * f.n_ff;
         mtasks_ = numa_n_ > 0 ? numa_plan_phase((int) f.n_ff, nb) : phase_tasks(mrows_);
         const auto a = std::chrono::steady_clock::now();
@@ -1839,7 +1853,7 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
 
     // ---- **THE HOST DRAINS TOO (R2.2), INSTEAD OF SPINNING ON `done_`.**
     //
-    // The loop below used to be `while (done_ != n) _mm_pause();`.  The host is pinned to core 0 - the core
+    // The loop below used to be `while (done_ != n) strata_cpu_pause();`.  The host is pinned to core 0 - the core
     // `physical_cores(true)` deliberately keeps the five workers off - so for the whole drain that core was
     // idle while five cores did six cores' worth of work.  Measured before the change: 33.7 GB/s against
     // 5/6 x 44.14 = 36.8 for five workers and 44.14 for six.

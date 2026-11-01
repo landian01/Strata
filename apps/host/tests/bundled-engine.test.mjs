@@ -256,3 +256,65 @@ test('the bundle cleanup lines reach the output of the host (the desktop log cop
     assert.deepEqual(seen, []);
   } finally { console.log = real; t.cleanup(); }
 });
+
+test('macOS: the engine bundle inside a signed .app stays (deleting it breaks the signature); outside an .app, or on another system, it is removed as before', async () => {
+  const t = setup();
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const as = value => Object.defineProperty(process, 'platform', { value, configurable: true });
+  try {
+    const app = join(t.base, 'Strata.app', 'Contents', 'Resources', 'engine-bundle');
+    mkdirSync(app, { recursive: true });
+    const inApp = makePackage(app, '0.1.48');
+    const outside = makePackage(t.bundle, '0.1.48');
+    // the engine is in the store (the app's own first start copies it), so the bundle would be removable
+    assert.equal((await installBundledEngine({ bundleDir: t.bundle, components: t.components })).action, 'installed');
+    const lines = [];
+    // 1. macOS, bundle inside Strata.app: kept, with one line that says why
+    as('darwin');
+    let r = await removeVerifiedBundle({ bundleDir: app, components: t.components, log: l => lines.push(l) });
+    assert.equal(r.removed, false);
+    assert.ok(existsSync(join(app, inApp, 'strata.exe')), 'the signed app keeps its engine files');
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /kept in the install folder.*macOS app bundles must remain unchanged after signing/);
+    // 2. macOS, bundle outside an .app: removed as before
+    r = await removeVerifiedBundle({ bundleDir: t.bundle, components: t.components, log: () => {} });
+    assert.equal(r.removed, true);
+    assert.equal(existsSync(join(t.bundle, outside)), false);
+    // 3. another system, bundle inside a folder called .app: removed as before (the guard is for macOS only)
+    as('linux');
+    r = await removeVerifiedBundle({ bundleDir: app, components: t.components, log: () => {} });
+    assert.equal(r.removed, true);
+    assert.equal(existsSync(join(app, inApp)), false);
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+    t.cleanup();
+  }
+});
+
+test('a card taken out of the PC does not decide the make; two present makes accept a build for either (#3892)', async () => {
+  const { gpuBackendsHere, windowsDisplayVendors } = await import('../server/bundled-engine.mjs');
+  const nl = String.fromCharCode(10);
+  const registry = 'MatchingDeviceId    REG_SZ    PCI/VEN_10DE&DEV_2882' + nl + 'MatchingDeviceId    REG_SZ    PCI/VEN_1002&DEV_7550';
+  // the NVIDIA card was swapped for a Radeon: Windows still lists its driver entry, but only the AMD card is present
+  assert.deepEqual([...windowsDisplayVendors({ platform: 'win32', run: () => registry, present: () => new Set(['1002']) })], ['1002']);
+  assert.equal(gpuBackendsHere({}, { vendors: new Set(['1002']) })[0], 'hip');
+  // both cards present: both makes count, NVIDIA first
+  assert.deepEqual([...windowsDisplayVendors({ platform: 'win32', run: () => registry, present: () => new Set(['1002', '10de']) })].sort(), ['1002', '10de']);
+  assert.deepEqual(gpuBackendsHere({}, { vendors: new Set(['10de', '1002']) }), ['cuda', 'hip']);
+  // present cannot be read: the registry answer stands
+  assert.equal(windowsDisplayVendors({ platform: 'win32', run: () => registry, present: () => new Set() }).size, 2);
+  // the second source is only asked when two makes are listed
+  assert.equal(windowsDisplayVendors({ platform: 'win32', run: () => 'MatchingDeviceId    REG_SZ    PCI/VEN_1002&DEV_7550', present: () => { throw new Error('must not run'); } }).size, 1);
+  assert.deepEqual(gpuBackendsHere({ STRATA_ENGINE_BACKEND: 'hip' }, { vendors: new Set(['10de', '1002']) }), ['hip']);
+
+  const t = setup();
+  try {
+    const name = makePackage(t.bundle, '0.2.0', { platform: 'windows-x86_64', backend: 'hip', variant: 'rx9070' });
+    const manifest = JSON.parse(readFileSync(join(t.bundle, name, 'engine-component.json'), 'utf8'));
+    manifest.archs = ['gfx1201'];
+    writeFileSync(join(t.bundle, name, 'engine-component.json'), JSON.stringify(manifest));
+    // an AMD build on a PC with an NVIDIA desktop card and an AMD model card is unpacked, not refused
+    const result = await installBundledEngine({ bundleDir: t.bundle, components: t.components, backend: ['cuda', 'hip'] });
+    assert.equal(result.action, 'installed');
+  } finally { t.cleanup(); }
+});
